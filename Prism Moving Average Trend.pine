@@ -1,0 +1,72 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © MisinkoMaster
+
+//@version=6
+indicator("Prism Moving Average Trend", "PriMAT │ MisinkoMaster", overlay = true, behind_chart = false)
+////////////////////////////////////////////////////////////////////////////////////////////////////
+// Get User Defined Inputs
+src = input.source(close, "Source", group = "Prism Moving Average Trend")
+len = input.int(31, "Lookback", tooltip = "Changes the amount of data used.", minval = 2,
+     group = "Prism Moving Average Trend")
+mul = input.float(0.85, "Multiplier", step = 0.05,
+     group = "Prism Moving Average Trend")
+////////////////////////////////////////////////////////////////////////////////////////////////////
+// Calculations
+sqrtlen = math.round(math.sqrt(len))
+PRISM(source, length) =>
+    alpha = 2 / (1 + len)
+    sum = 0.0
+    w = 0.0
+    for i = 0 to length - 1
+        angle = (i + 1) * math.pi / (length + 1)
+        weight = (math.sin(angle) + math.cos(angle) + 1) / 2
+        sum += source[i] * weight
+        w += weight
+
+    base = w != 0 ? sum / w : source
+
+    prism = base * (1 - alpha) + source * alpha
+    prism
+
+base = PRISM(src, len)
+prism = PRISM(base, sqrtlen)
+
+vol = ta.atr(len)*mul
+upper = prism + vol
+lower = prism - vol
+
+change = prism - prism[1]
+////////////////////////////////////////////////////////////////////////////////////////////////////
+// Trend Logic
+var trend = 0
+if src > upper and change > 0
+    trend := 1
+if src < lower and change < 0
+    trend := -1
+////////////////////////////////////////////////////////////////////////////////////////////////////
+// Plotting
+var col = color.rgb(72, 72, 72)
+var colT = color.rgb(72, 72, 72, 60)
+if trend == 1
+    col := color.rgb(0, 255, 187)
+    colT := color.rgb(0, 255, 187, 60)
+if trend == -1
+    col := color.rgb(255, 0, 157)
+    colT := color.rgb(255, 0, 157, 60)
+
+var colC = color.rgb(72, 72, 72)
+if change > 0
+    colC := color.rgb(0, 255, 187)
+if change < 0
+    colC := color.rgb(255, 0, 157)
+
+plotcandle(open, high, low, close, color = col, bordercolor = col, wickcolor = col, display = display.pane)
+p = plot(prism, "Prism Moving Average", col, 3)
+u = plot(upper, "Prism Upper Band", col, 2)
+l = plot(lower, "Prism Lower Band", col, 2)
+plot(change, "Change", color = colC, display = display.status_line)
+fill(u, l, colT, "Band Filling")
+
+colDanger = (src-prism)*trend == ta.lowest((src-prism)*trend, len) ? color.rgb(253, 249, 57, 65) : na
+bgcolor(colDanger, title = "Potential Trend Reversal Warning")
+
