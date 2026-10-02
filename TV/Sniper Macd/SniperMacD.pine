@@ -68,7 +68,7 @@ table.cell(marketTable, 0, 0, text = marketCondition, bgcolor = bgColor, text_co
 
 // Watermark
 Watermark = table.new(position.bottom_center, 1, 4, border_width = 3)
-table.cell(Watermark, 0, 0, text = 'Boes Sniper Trading', text_color = color.new(color.white, 95), text_size = size.huge)
+table.cell(Watermark, 0, 0, text = 'Sniper MacD', text_color = color.new(color.white, 95), text_size = size.huge)
 
 // Signal when MACD crosses Signal Line
 bullishReversal = ta.crossover(macdLine, signalLine)
