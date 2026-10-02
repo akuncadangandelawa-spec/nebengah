@@ -1,0 +1,156 @@
+//@version=6
+indicator('Sniper MacD', overlay = true)
+
+// User settings for MACD
+shortTerm = input.int(12, title = 'Short-Term EMA Period', minval = 1)
+longTerm = input.int(26, title = 'Long-Term EMA Period', minval = 1)
+signalTerm = input.int(9, title = 'Signal Line EMA Period', minval = 1)
+
+// User settings for table
+tablePosition = input.string('top_right', title = 'Table Position', options = ['top_left', 'top_right', 'bottom_left', 'bottom_right'])
+tableTextSizeInput = input.int(14, title = 'Table Text Size', minval = 8, maxval = 24)
+tableTextColor = input.color(color.white, title = 'Table Text Color')
+
+// Map the input integer to a valid size constant for the table
+tableTextSize = tableTextSizeInput <= 10 ? size.small : tableTextSizeInput <= 18 ? size.normal : size.large
+
+// User inputs for Alarm Time
+alarmHourET = input.int(16, title = 'Alarm Hour (Eastern Time)', minval = 0, maxval = 23) // Hour input (0-23)
+alarmMinuteET = input.int(0, title = 'Alarm Minute (Eastern Time)', minval = 0, maxval = 59) // Minute input (0-59)
+timezoneOffset = input.int(-5, title = 'Eastern Time Zone Offset (hours)', minval = -12, maxval = 12) // Offset input
+
+// User input for look-back period to detect support and resistance zones
+lookBackPeriod = input.int(20, title = 'Look-back Period for Support and Resistance', minval = 1)
+
+// MACD Calculation with user-defined settings
+macdLine = ta.ema(close, shortTerm) - ta.ema(close, longTerm)
+signalLine = ta.ema(macdLine, signalTerm)
+histogram = macdLine - signalLine
+
+// Buy and Sell signals
+buySignal = ta.crossover(macdLine, signalLine)
+sellSignal = ta.crossunder(macdLine, signalLine)
+
+// Market Condition (BULL, FLAT, BEAR)
+marketCondition = 'FLAT'
+bgColor = color.yellow // Default to FLAT
+
+if macdLine > signalLine
+    marketCondition := 'BULL'
+    bgColor := color.green
+    bgColor
+else if macdLine < signalLine
+    marketCondition := 'BEAR'
+    bgColor := color.red
+    bgColor
+
+// Buy and Sell marks
+plotshape(series = buySignal, location = location.belowbar, color = color.green, style = shape.labelup, title = 'Buy Signal', text = 'BUY')
+plotshape(series = sellSignal, location = location.abovebar, color = color.red, style = shape.labeldown, title = 'Sell Signal', text = 'SELL')
+
+// MACD Zero Line Cross Signals
+macdCrossAboveZero = ta.crossover(macdLine, 0)
+macdCrossBelowZero = ta.crossunder(macdLine, 0)
+
+plotshape(series = macdCrossAboveZero, location = location.belowbar, color = color.green, style = shape.cross, title = 'MACD Cross Above Zero', size = size.tiny)
+plotshape(series = macdCrossBelowZero, location = location.abovebar, color = color.red, style = shape.cross, title = 'MACD Cross Below Zero', size = size.tiny)
+
+// Alert conditions
+alertcondition(buySignal, title = 'Buy Signal', message = 'MACD Buy Signal Triggered!')
+alertcondition(sellSignal, title = 'Sell Signal', message = 'MACD Sell Signal Triggered!')
+alertcondition(macdCrossAboveZero, title = 'MACD Cross Above Zero', message = 'MACD has crossed above the zero line!')
+alertcondition(macdCrossBelowZero, title = 'MACD Cross Below Zero', message = 'MACD has crossed below the zero line!')
+
+// Display Market Condition Table
+var table marketTable = table.new(tablePosition == 'top_left' ? position.top_left : tablePosition == 'top_right' ? position.top_right : tablePosition == 'bottom_left' ? position.bottom_left : position.bottom_right, 1, 1)
+
+table.cell(marketTable, 0, 0, text = marketCondition, bgcolor = bgColor, text_color = tableTextColor, text_size = tableTextSize)
+
+// Watermark
+Watermark = table.new(position.bottom_center, 1, 4, border_width = 3)
+table.cell(Watermark, 0, 0, text = 'Boes Sniper Trading', text_color = color.new(color.white, 95), text_size = size.huge)
+
+// Signal when MACD crosses Signal Line
+bullishReversal = ta.crossover(macdLine, signalLine)
+bearishReversal = ta.crossunder(macdLine, signalLine)
+
+// Highlight on the chart when signals occur
+bgcolor(bullishReversal ? color.new(color.green, 90) : na)
+bgcolor(bearishReversal ? color.new(color.red, 90) : na)
+
+// Alert condition for trend reversal
+alertcondition(bullishReversal, title = 'Bullish Reversal', message = 'Bullish Reversal Signal')
+alertcondition(bearishReversal, title = 'Bearish Reversal', message = 'Bearish Reversal Signal')
+
+// Define ATR and Price Range
+atrValue = ta.atr(14)
+priceRange = high - low
+
+// Define Flat Zone Conditions
+smaAtr = ta.sma(atrValue, 50)
+smaPriceRange = ta.sma(priceRange, 20)
+flatZone = atrValue < smaAtr and priceRange < smaPriceRange
+
+// Highlight flat zones with a light orange background
+bgcolor(flatZone ? color.new(color.orange, 90) : na) // Highlight flat zones in light orange
+
+// Alert condition for flat zones
+alertcondition(flatZone, title = 'Flat Zone Detected', message = 'Flat Zone Detected')
+
+// User input for RSI length and levels
+rsiLength = input.int(14, title = 'RSI Length', minval = 1)
+rsiOverbought = input.int(70, title = 'RSI Overbought Level')
+rsiOversold = input.int(30, title = 'RSI Oversold Level')
+
+// Calculate RSI
+rsiValue = ta.rsi(close, rsiLength)
+
+// Plot overbought and oversold levels
+hline(rsiOverbought, 'Overbought', color = color.red)
+hline(rsiOversold, 'Oversold', color = color.green)
+
+// Signal for overbought condition (RSI crosses above the overbought level)
+overboughtSignal = ta.crossover(rsiValue, rsiOverbought)
+// Signal for oversold condition (RSI crosses below the oversold level)
+oversoldSignal = ta.crossunder(rsiValue, rsiOversold)
+
+// Plot signals on the chart
+plotshape(series = overboughtSignal, location = location.abovebar, color = color.red, style = shape.labeldown, title = 'Overbought Signal', text = 'Overbought')
+plotshape(series = oversoldSignal, location = location.belowbar, color = color.green, style = shape.labelup, title = 'Oversold Signal', text = 'Oversold')
+
+// Alert conditions for overbought and oversold signals
+alertcondition(overboughtSignal, title = 'RSI Overbought Signal', message = 'RSI has crossed above the overbought level, indicating overbought condition.')
+alertcondition(oversoldSignal, title = 'RSI Oversold Signal', message = 'RSI has crossed below the oversold level, indicating oversold condition.')
+
+// Calculate the alarm time in UTC based on the Eastern Time settings and timezone offset
+alarmHourUTC = alarmHourET - timezoneOffset
+alarmTimeCondition = hour == alarmHourUTC and minute == alarmMinuteET
+
+// 4 PM Close Alert - Trigger an alert at the user-defined time in Eastern Time
+alertcondition(alarmTimeCondition, title = 'Alarm Time', message = 'It is time to close all contracts (Alarm triggered at user-defined time).')
+
+// Support and Resistance Zone Detection
+
+// Detecting swing highs and lows using adjustable look-back period
+swingHigh = ta.highest(high, lookBackPeriod)
+swingLow = ta.lowest(low, lookBackPeriod)
+
+// Store lines to avoid unnecessary updates
+var line supportLine = na
+var line resistanceLine = na
+
+// Detect when new swing high and low occur
+if swingHigh != swingHigh[1]
+    supportLine := line.new(bar_index, swingLow, bar_index, swingLow, color = color.green, width = 2)
+    supportLine
+if swingLow != swingLow[1]
+    resistanceLine := line.new(bar_index, swingHigh, bar_index, swingHigh, color = color.red, width = 2)
+    resistanceLine
+
+// Extend the lines
+if not na(supportLine)
+    line.set_xy1(supportLine, bar_index[1], swingLow)
+    line.set_xy2(supportLine, bar_index, swingLow)
+if not na(resistanceLine)
+    line.set_xy1(resistanceLine, bar_index[1], swingHigh)
+    line.set_xy2(resistanceLine, bar_index, swingHigh)
