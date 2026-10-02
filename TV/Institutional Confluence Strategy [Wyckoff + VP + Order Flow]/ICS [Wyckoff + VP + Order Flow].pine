@@ -1,0 +1,218 @@
+//@version=6
+indicator("Institutional Confluence Strategy [Wyckoff + VP + Order Flow] FIXED", overlay = true, max_labels_count = 500, max_boxes_count = 500, max_lines_count = 500)
+
+// ==========================================
+// 1. INPUT PARAMETERS
+// ==========================================
+grp_wyckoff = "1. Wyckoff Structure Settings"
+wyckoff_lookback = input.int(30, "Trading Range Lookback", minval = 10, group = grp_wyckoff)
+spring_threshold = input.float(0.5, "Liquidity Sweep Threshold (%)", minval = 0.1, step = 0.1, group = grp_wyckoff)
+
+grp_vp = "2. Volume Profile Settings"
+vp_bars = input.int(50, "Volume Profile Lookback Bars", minval = 20, group = grp_vp)
+vp_row_count = input.int(24, "Profile Row Resolution", minval = 10, maxval = 100, group = grp_vp)
+value_area_pct = input.float(70.0, "Value Area Percentage (%)", minval = 50.0, maxval = 95.0, group = grp_vp)
+
+grp_of = "3. Order Flow & Delta Trigger"
+vol_factor = input.float(1.3, "Volume Spike Factor (vs SMA)", minval = 1.0, group = grp_of)
+delta_length = input.int(14, "Delta Divergence SMA Length", group = grp_of)
+
+grp_score = "4. Signal & Scoring Settings"
+min_score_signal = input.int(70, "Minimum Score for Entry Signal", minval = 50, maxval = 100, group = grp_score)
+
+// ==========================================
+// PRE-CALCULATIONS
+// ==========================================
+global_vp_max_p = ta.highest(high, vp_bars)
+global_vp_min_p = ta.lowest(low, vp_bars)
+global_range_high = ta.highest(high[1], wyckoff_lookback)
+global_range_low = ta.lowest(low[1], wyckoff_lookback)
+global_vol_sma_20 = ta.sma(volume, 20)
+
+bar_range = high - low
+body_ratio = bar_range > 0 ? (close - open) / bar_range : 0.0
+estimated_buy_vol = volume * (0.5 * (1.0 + body_ratio))
+estimated_sell_vol = volume - estimated_buy_vol
+net_delta = estimated_buy_vol - estimated_sell_vol
+global_delta_sma = ta.sma(net_delta, delta_length)
+
+// ==========================================
+// 2. WYCKOFF LOGIC (Spring & UTAD)
+// ==========================================
+bool confirmed = barstate.isconfirmed
+
+bool is_spring_sweep = confirmed and not na(global_range_low) and low < global_range_low and low >= global_range_low * (1.0 - spring_threshold / 100.0) and close > global_range_low
+bool is_utad_sweep   = confirmed and not na(global_range_high) and high > global_range_high and high <= global_range_high * (1.0 + spring_threshold / 100.0) and close < global_range_high
+
+var bool wyckoff_spring_active = false
+var bool wyckoff_utad_active = false
+var int wyckoff_start_bar = na
+var int last_signal_bar = na
+
+if is_spring_sweep
+    wyckoff_spring_active := true
+    wyckoff_utad_active := false
+    wyckoff_start_bar := bar_index
+
+if is_utad_sweep
+    wyckoff_utad_active := true
+    wyckoff_spring_active := false
+    wyckoff_start_bar := bar_index
+
+if not na(wyckoff_start_bar) and bar_index - wyckoff_start_bar > 30
+    wyckoff_spring_active := false
+    wyckoff_utad_active := false
+    wyckoff_start_bar := na
+
+// ==========================================
+// 3. VOLUME PROFILE FUNCTION (OPTIMIZED)
+// ==========================================
+get_vp(float max_p, float min_p) =>
+    float poc = na
+    float val = na
+    float vah = na
+    float step = (max_p - min_p) / vp_row_count
+    if step > 0
+        matrix<float> profile = matrix.new<float>(vp_row_count, 1, 0.0)
+        float total_vol = 0.0
+        for i = 0 to vp_bars - 1
+            float b_vol = volume[i]
+            float b_close = close[i]
+            total_vol += b_vol
+            int bin = math.floor((b_close - min_p) / step)
+            bin := math.max(0, math.min(vp_row_count - 1, bin))
+            float current_v = matrix.get(profile, bin, 0)
+            matrix.set(profile, bin, 0, current_v + b_vol)
+
+        int poc_bin = 0
+        float max_bin_vol = 0.0
+        for b = 0 to vp_row_count - 1
+            float v = matrix.get(profile, b, 0)
+            if v > max_bin_vol
+                max_bin_vol := v
+                poc_bin := b
+
+        poc := min_p + (poc_bin + 0.5) * step
+        float target_va_vol = total_vol * (value_area_pct / 100.0)
+        float cum_vol = max_bin_vol
+        int up_b = poc_bin
+        int dn_b = poc_bin
+
+        while cum_vol < target_va_vol and (up_b < vp_row_count - 1 or dn_b > 0)
+            float v_up = (up_b < vp_row_count - 1) ? matrix.get(profile, up_b + 1, 0) : 0.0
+            float v_dn = (dn_b > 0) ? matrix.get(profile, dn_b - 1, 0) : 0.0
+            if v_up >= v_dn and up_b < vp_row_count - 1
+                up_b += 1
+                cum_vol += v_up
+            else if dn_b > 0
+                dn_b -= 1
+                cum_vol += v_dn
+            else
+                break
+
+        val := min_p + dn_b * step
+        vah := min_p + (up_b + 1) * step
+    [poc, val, vah]
+
+// Hitung VP: pada bar confirmed saat Wyckoff aktif, dan pada bar terakhir (real-time)
+var float vp_poc = na
+var float vp_val = na
+var float vp_vah = na
+
+if (confirmed and (wyckoff_spring_active or wyckoff_utad_active)) or barstate.islast
+    [p, v, h] = get_vp(global_vp_max_p, global_vp_min_p)
+    vp_poc := p
+    vp_val := v
+    vp_vah := h
+
+// Retest Area
+bool near_buy_zone  = not na(vp_poc) and vp_poc != 0 and (math.abs(low - vp_poc) / vp_poc <= 0.005 or (not na(vp_val) and vp_val != 0 and math.abs(low - vp_val) / vp_val <= 0.005))
+bool near_sell_zone = not na(vp_poc) and vp_poc != 0 and (math.abs(high - vp_poc) / vp_poc <= 0.005 or (not na(vp_vah) and vp_vah != 0 and math.abs(high - vp_vah) / vp_vah <= 0.005))
+
+// ==========================================
+// 4. ORDER FLOW & DELTA (CONFIRMED ONLY)
+// ==========================================
+bool buying_imbalance = confirmed and volume > 0 and not na(global_vol_sma_20) and (estimated_buy_vol / volume > 0.65) and (close > open) and (volume > global_vol_sma_20 * vol_factor)
+bool bull_delta_div  = confirmed and not na(global_delta_sma[1]) and (low < low[1]) and (net_delta > global_delta_sma[1]) and (net_delta > 0)
+bool buy_of_trigger  = buying_imbalance or bull_delta_div
+
+bool selling_imbalance = confirmed and volume > 0 and not na(global_vol_sma_20) and (estimated_sell_vol / volume > 0.65) and (close < open) and (volume > global_vol_sma_20 * vol_factor)
+bool bear_delta_div   = confirmed and not na(global_delta_sma[1]) and (high > high[1]) and (net_delta < global_delta_sma[1]) and (net_delta < 0)
+bool sell_of_trigger  = selling_imbalance or bear_delta_div
+
+// ==========================================
+// 5. CONFLUENCE SCORING
+// ==========================================
+int score_wyckoff_buy = wyckoff_spring_active ? 40 : 0
+int score_vp_buy      = near_buy_zone ? 30 : 10
+int score_of_buy      = (buying_imbalance and bull_delta_div) ? 30 : (buy_of_trigger ? 20 : 0)
+int total_buy_score   = score_wyckoff_buy + score_vp_buy + score_of_buy
+
+int score_wyckoff_sell = wyckoff_utad_active ? 40 : 0
+int score_vp_sell      = near_sell_zone ? 30 : 10
+int score_of_sell      = (selling_imbalance and bear_delta_div) ? 30 : (sell_of_trigger ? 20 : 0)
+int total_sell_score   = score_wyckoff_sell + score_vp_sell + score_of_sell
+
+// Valid Signal + Cooldown
+bool valid_buy_signal  = confirmed and wyckoff_spring_active and buy_of_trigger and (total_buy_score >= min_score_signal) and (na(last_signal_bar) or bar_index - last_signal_bar > 5)
+bool valid_sell_signal = confirmed and wyckoff_utad_active and sell_of_trigger and (total_sell_score >= min_score_signal) and (na(last_signal_bar) or bar_index - last_signal_bar > 5)
+
+if valid_buy_signal or valid_sell_signal
+    last_signal_bar := bar_index
+    wyckoff_spring_active := false
+    wyckoff_utad_active := false
+    wyckoff_start_bar := na
+
+// ==========================================
+// 6. VISUALIZATION
+// ==========================================
+plot(global_range_high, "Wyckoff Range High", color = color.new(color.red, 40), style = plot.style_linebr, linewidth = 2)
+plot(global_range_low, "Wyckoff Range Low", color = color.new(color.green, 40), style = plot.style_linebr, linewidth = 2)
+
+// VP Lines (update real-time tanpa repaint)
+var line vp_poc_line = na
+var line vp_val_line = na
+var line vp_vah_line = na
+
+if barstate.islast and not na(vp_poc) and bar_index >= vp_bars
+    if na(vp_poc_line)
+        vp_poc_line := line.new(bar_index - vp_bars, vp_poc, bar_index, vp_poc, color = color.yellow, width = 2)
+        vp_val_line := line.new(bar_index - vp_bars, vp_val, bar_index, vp_val, color = color.orange, width = 1)
+        vp_vah_line := line.new(bar_index - vp_bars, vp_vah, bar_index, vp_vah, color = color.blue, width = 1)
+    else
+        line.set_xy1(vp_poc_line, bar_index - vp_bars, vp_poc)
+        line.set_xy2(vp_poc_line, bar_index, vp_poc)
+        line.set_xy1(vp_val_line, bar_index - vp_bars, vp_val)
+        line.set_xy2(vp_val_line, bar_index, vp_val)
+        line.set_xy1(vp_vah_line, bar_index - vp_bars, vp_vah)
+        line.set_xy2(vp_vah_line, bar_index, vp_vah)
+
+plotshape(valid_buy_signal, title = "BUY ENTRY", style = shape.triangleup, location = location.belowbar, color = color.green, size = size.normal)
+plotshape(valid_sell_signal, title = "SELL ENTRY", style = shape.triangledown, location = location.abovebar, color = color.red, size = size.normal)
+
+if valid_buy_signal
+    label.new(bar_index, low, text = "BUY ENTRY\nScore: " + str.tostring(total_buy_score) + "/100", color = color.green, textcolor = color.white, style = label.style_label_up, yloc = yloc.belowbar)
+
+if valid_sell_signal
+    label.new(bar_index, high, text = "SELL ENTRY\nScore: " + str.tostring(total_sell_score) + "/100", color = color.red, textcolor = color.white, style = label.style_label_down, yloc = yloc.abovebar)
+
+bgcolor(is_spring_sweep ? color.new(color.green, 85) : na, title = "Wyckoff Spring")
+bgcolor(is_utad_sweep ? color.new(color.red, 85) : na, title = "Wyckoff UTAD")
+
+// ==========================================
+// 7. DASHBOARD
+// ==========================================
+var table dash = table.new(position = position.top_right, columns = 2, rows = 5, bgcolor = color.new(color.black, 20), border_color = color.gray, border_width = 1)
+
+if barstate.islast
+    table.cell(dash, 0, 0, "Institutional Metric", bgcolor = color.gray, text_color = color.white)
+    table.cell(dash, 1, 0, "Status / Value", bgcolor = color.gray, text_color = color.white)
+    table.cell(dash, 0, 1, "Wyckoff Context", text_color = color.white)
+    table.cell(dash, 1, 1, wyckoff_spring_active ? "Spring (Bullish)" : (wyckoff_utad_active ? "UTAD (Bearish)" : "Neutral Range"), bgcolor = wyckoff_spring_active ? color.green : (wyckoff_utad_active ? color.red : color.gray), text_color = color.white)
+    table.cell(dash, 0, 2, "VP Retest Zone", text_color = color.white)
+    table.cell(dash, 1, 2, near_buy_zone ? "Near Buy Zone (VAL/POC)" : (near_sell_zone ? "Near Sell Zone (VAH/POC)" : "Mid Range"), bgcolor = (near_buy_zone or near_sell_zone) ? color.blue : color.gray, text_color = color.white)
+    table.cell(dash, 0, 3, "Order Flow Trigger", text_color = color.white)
+    table.cell(dash, 1, 3, buy_of_trigger ? "Bullish OF Trigger" : (sell_of_trigger ? "Bearish OF Trigger" : "Neutral"), bgcolor = buy_of_trigger ? color.green : (sell_of_trigger ? color.red : color.gray), text_color = color.white)
+    int active_score = wyckoff_spring_active ? total_buy_score : (wyckoff_utad_active ? total_sell_score : math.max(total_buy_score, total_sell_score))
+    table.cell(dash, 0, 4, "Confluence Score", text_color = color.white)
+    table.cell(dash, 1, 4, str.tostring(active_score) + " / 100", bgcolor = active_score >= min_score_signal ? color.green : color.maroon, text_color = color.white)
