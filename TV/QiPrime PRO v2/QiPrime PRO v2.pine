@@ -1,0 +1,455 @@
+//@version=6
+indicator("QiPrime Institutional Signal Engine PRO v2", shorttitle="QiPrime PRO v2", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=200, max_bars_back=500)
+
+//====================================================
+// INPUT: PRESET
+//====================================================
+gPre = "Preset"
+preset = input.string("Balanced", "Preset", options=["Custom", "Loose", "Balanced", "Tight"], group=gPre, tooltip="Loose/Balanced/Tight mengatur Minimum Score dan jendela sinyal. Custom memakai pengaturan di grup Custom.")
+
+gCus = "Custom (aktif hanya jika Preset = Custom)"
+manHTF      = input.bool(true, "Wajib HTF EMA200", group=gCus)
+manADX      = input.bool(true, "Wajib ADX", group=gCus)
+customScore = input.int(55, "Minimum Score", minval=0, maxval=100, group=gCus)
+customWin   = input.int(5, "Jendela konfirmasi (bar)", minval=1, maxval=20, group=gCus)
+
+//====================================================
+// INPUT: TREND / MOMENTUM
+//====================================================
+gTrend = "Trend & Momentum"
+stATR   = input.int(10, "Supertrend ATR", minval=1, group=gTrend)
+stMult  = input.float(3.0, "Supertrend Multiplier", minval=0.1, step=0.1, group=gTrend)
+zemaLen = input.int(20, "ZLEMA Length", minval=2, group=gTrend)
+adxLen  = input.int(14, "ADX Length", minval=1, group=gTrend)
+adxMin  = input.float(25, "ADX Minimum", minval=0, group=gTrend)
+htfTF   = input.timeframe("60", "HTF Timeframe (harus > TF chart)", group=gTrend)
+volLen  = input.int(20, "Volume SMA", minval=1, group=gTrend)
+atrLen  = input.int(14, "ATR Length", minval=1, group=gTrend)
+atrMult = input.float(1.1, "ATR Expansion Mult", minval=0.1, step=0.05, group=gTrend)
+
+//====================================================
+// INPUT: SMC
+//====================================================
+gSMC = "Smart Money Concepts"
+swingLen     = input.int(5, "Swing Length", minval=2, group=gSMC)
+maxSwingAge  = input.int(60, "Umur maks. swing untuk sweep (bar)", minval=10, group=gSMC)
+fvgMin       = input.float(0.3, "FVG minimum (x ATR)", minval=0.0, step=0.05, group=gSMC)
+obLookback   = input.int(50, "OB lookback maks. (bar)", minval=5, maxval=100, group=gSMC)
+maxOB        = input.int(6, "Jumlah OB aktif maks. (per arah gabungan)", minval=1, maxval=20, group=gSMC)
+showOB       = input.bool(true, "Tampilkan Order Block", group=gSMC)
+
+//====================================================
+// INPUT: VOLUME PROFILE
+//====================================================
+gVP = "Volume Profile (rolling)"
+showVP   = input.bool(true, "Tampilkan Volume Profile", group=gVP)
+vpBars   = input.int(150, "Jumlah bar profil", minval=30, maxval=400, group=gVP)
+vpRows   = input.int(24, "Jumlah baris (bin)", minval=10, maxval=40, group=gVP)
+vaPct    = input.float(70.0, "Value Area %", minval=50, maxval=95, group=gVP)
+vpWidth  = input.int(30, "Lebar histogram (% dari bar profil)", minval=10, maxval=80, group=gVP)
+
+//====================================================
+// INPUT: RISK
+//====================================================
+gRisk = "Manajemen Risiko"
+slBuf        = input.float(0.2, "Buffer SL di luar swing (x ATR)", minval=0, step=0.05, group=gRisk)
+slMult       = input.float(1.5, "SL ATR (jika swing tidak valid)", minval=0.1, step=0.1, group=gRisk)
+maxSL        = input.float(3.0, "Batas jarak SL maks. (x ATR)", minval=0.5, step=0.1, group=gRisk)
+rr           = input.float(2.0, "Risk:Reward", minval=0.5, step=0.1, group=gRisk)
+equity       = input.float(10000, "Ekuitas akun", minval=1, group=gRisk)
+riskPct      = input.float(1.0, "Risiko per trade (%)", minval=0.01, step=0.05, group=gRisk)
+contractSize = input.float(100000, "Contract size per 1 lot", minval=0.0001, group=gRisk, tooltip="Forex standar = 100000. XAUUSD umumnya = 100. Perhitungan akurat jika mata uang kuotasi = mata uang akun.")
+
+//====================================================
+// INPUT: TAMPILAN
+//====================================================
+gVis = "Tampilan"
+showLabels = input.bool(true, "Label sinyal", group=gVis)
+showLevels = input.bool(true, "Garis Entry/SL/TP saat sinyal", group=gVis)
+showBg     = input.bool(false, "Warna latar sesuai tren", group=gVis)
+showTable  = input.bool(true, "Tabel info", group=gVis)
+
+//====================================================
+// PRESET ENGINE
+//====================================================
+bool useHTF  = preset == "Custom" ? manHTF : true
+bool useADX  = preset == "Custom" ? manADX : true
+int  minScore = preset == "Loose" ? 40 : preset == "Balanced" ? 55 : preset == "Tight" ? 70 : customScore
+int  sigWin   = preset == "Loose" ? 7 : preset == "Balanced" ? 5 : preset == "Tight" ? 3 : customWin
+
+//====================================================
+// HELPER
+//====================================================
+f_recent(bool cond, int n) =>
+    nz(ta.barssince(cond), 9999) <= n
+
+//====================================================
+// SUPERTREND + ZLEMA (zero-lag EMA yang benar)
+//====================================================
+[st, dir] = ta.supertrend(stMult, stATR)
+bool bullTrend = dir < 0
+bool bearTrend = dir > 0
+
+zLag = math.floor((zemaLen - 1) / 2)
+float zema = ta.ema(close + (close - close[zLag]), zemaLen)
+
+plot(st, "Supertrend", color=bullTrend ? color.lime : color.red, linewidth=2)
+plot(zema, "ZLEMA", color=color.orange, linewidth=2)
+
+//====================================================
+// ADX (bawaan ta.dmi)
+//====================================================
+[diPlus, diMinus, adxVal] = ta.dmi(adxLen, adxLen)
+bool adxBull = adxVal > adxMin and diPlus > diMinus
+bool adxBear = adxVal > adxMin and diMinus > diPlus
+
+//====================================================
+// HTF EMA200 (anti-repaint: bar HTF yang sudah tutup)
+//====================================================
+float htfEMA = request.security(syminfo.tickerid, htfTF, ta.ema(close, 200)[1], lookahead=barmerge.lookahead_on)
+plot(htfEMA, "HTF EMA200", color=color.aqua)
+bool htfBull = close > htfEMA
+bool htfBear = close < htfEMA
+
+//====================================================
+// VOLUME & ATR
+//====================================================
+float volMA = ta.sma(volume, volLen)
+bool volFilter = volume > volMA
+
+float atrValue = ta.atr(atrLen)
+float atrMA = ta.sma(atrValue, 20)
+bool atrExpansion = atrValue > atrMA * atrMult
+
+//====================================================
+// STRUKTUR: SWING, BOS, CHoCH (berbasis state)
+//====================================================
+var float lastSwingHigh = na
+var float lastSwingLow  = na
+var int   swingHighBar  = na
+var int   swingLowBar   = na
+var bool  highBroken    = true
+var bool  lowBroken     = true
+var int   structure     = 0   // 1 = bullish, -1 = bearish, 0 = belum terdefinisi
+
+float phv = ta.pivothigh(high, swingLen, swingLen)
+float plv = ta.pivotlow(low, swingLen, swingLen)
+
+if not na(phv)
+    lastSwingHigh := phv
+    swingHighBar  := bar_index - swingLen
+    highBroken    := false
+if not na(plv)
+    lastSwingLow := plv
+    swingLowBar  := bar_index - swingLen
+    lowBroken    := false
+
+bool bullBreak = false
+bool bearBreak = false
+
+if not na(lastSwingHigh) and not highBroken and close > lastSwingHigh
+    bullBreak := true
+    highBroken := true
+if not na(lastSwingLow) and not lowBroken and close < lastSwingLow
+    bearBreak := true
+    lowBroken := true
+
+// BOS = break searah struktur, CHoCH = break berlawanan dengan struktur sebelumnya
+bool bullChochEvt = bullBreak and structure == -1
+bool bullBosEvt   = bullBreak and structure != -1
+bool bearChochEvt = bearBreak and structure == 1
+bool bearBosEvt   = bearBreak and structure != 1
+
+if bullBreak
+    structure := 1
+if bearBreak
+    structure := -1
+
+//====================================================
+// LIQUIDITY SWEEP (dengan batas umur swing)
+//====================================================
+bool bullSweep = not na(lastSwingLow) and low < lastSwingLow and close > lastSwingLow and (bar_index - nz(swingLowBar)) <= maxSwingAge
+bool bearSweep = not na(lastSwingHigh) and high > lastSwingHigh and close < lastSwingHigh and (bar_index - nz(swingHighBar)) <= maxSwingAge
+
+//====================================================
+// FVG (dengan ukuran minimum & candle tengah searah)
+//====================================================
+bool bullFVG = low > high[2] and (low - high[2]) > atrValue * fvgMin and close[1] > open[1]
+bool bearFVG = high < low[2] and (low[2] - high) > atrValue * fvgMin and close[1] < open[1]
+
+//====================================================
+// ORDER BLOCK
+//====================================================
+type OB
+    float top
+    float bot
+    bool  bull
+    box   bx
+
+var array<OB> obs = array.new<OB>()
+
+// 1) Mitigasi: OB dihapus jika harga close menembus zona
+if array.size(obs) > 0
+    for i = array.size(obs) - 1 to 0
+        OB o = array.get(obs, i)
+        bool mit = o.bull ? close < o.bot : close > o.top
+        if mit
+            box.delete(o.bx)
+            array.remove(obs, i)
+
+// 2) Pembentukan OB baru pada setiap break struktur
+if bullBreak and not na(swingLowBar)
+    int maxBack = math.max(1, math.min(obLookback, bar_index - swingLowBar))
+    int obIdx = 0
+    float minLow = 1.0e10
+    for i = 1 to maxBack
+        if close[i] < open[i] and low[i] < minLow
+            minLow := low[i]
+            obIdx := i
+    if obIdx > 0
+        float t = high[obIdx]
+        float b = low[obIdx]
+        box bx = na
+        if showOB
+            bx := box.new(bar_index - obIdx, t, bar_index + 1, b, border_color=color.new(color.green, 40), bgcolor=color.new(color.green, 85), extend=extend.right, text="Bull OB", text_size=size.tiny, text_color=color.new(color.green, 20))
+        array.push(obs, OB.new(t, b, true, bx))
+
+if bearBreak and not na(swingHighBar)
+    int maxBack = math.max(1, math.min(obLookback, bar_index - swingHighBar))
+    int obIdx = 0
+    float maxHigh = -1.0e10
+    for i = 1 to maxBack
+        if close[i] > open[i] and high[i] > maxHigh
+            maxHigh := high[i]
+            obIdx := i
+    if obIdx > 0
+        float t = high[obIdx]
+        float b = low[obIdx]
+        box bx = na
+        if showOB
+            bx := box.new(bar_index - obIdx, t, bar_index + 1, b, border_color=color.new(color.red, 40), bgcolor=color.new(color.red, 85), extend=extend.right, text="Bear OB", text_size=size.tiny, text_color=color.new(color.red, 20))
+        array.push(obs, OB.new(t, b, false, bx))
+
+// 3) Batasi jumlah OB aktif
+if array.size(obs) > maxOB
+    OB old = array.shift(obs)
+    box.delete(old.bx)
+
+// 4) Deteksi harga menyentuh OB aktif (retest)
+bool inBullOB = false
+bool inBearOB = false
+for o in obs
+    if o.bull and low <= o.top
+        inBullOB := true
+    if not o.bull and high >= o.bot
+        inBearOB := true
+
+//====================================================
+// VOLUME PROFILE (rolling, memakai bar [1..vpBars] agar tidak repaint)
+//====================================================
+float vpHi = ta.highest(high, vpBars)[1]
+float vpLo = ta.lowest(low, vpBars)[1]
+
+var vpVol = array.new_float(vpRows, 0.0)
+float vpPOC = na
+float vpVAH = na
+float vpVAL = na
+int vaLoIdx = na
+int vaHiIdx = na
+int pocIdx  = na
+
+if bar_index > vpBars + 1 and not na(vpHi) and vpHi > vpLo
+    array.fill(vpVol, 0.0)
+    float step = (vpHi - vpLo) / vpRows
+    for i = 1 to vpBars
+        float bl = low[i]
+        float bh = high[i]
+        int r0 = math.max(0, math.min(vpRows - 1, int((bl - vpLo) / step)))
+        int r1 = math.max(0, math.min(vpRows - 1, int((bh - vpLo) / step)))
+        float share = nz(volume[i]) / (r1 - r0 + 1)
+        for r = r0 to r1
+            array.set(vpVol, r, array.get(vpVol, r) + share)
+    pocIdx := array.indexof(vpVol, array.max(vpVol))
+    float total = array.sum(vpVol)
+    float acc = array.get(vpVol, pocIdx)
+    int lo = pocIdx
+    int hi = pocIdx
+    while acc < total * vaPct / 100.0 and (lo > 0 or hi < vpRows - 1)
+        float below = lo > 0 ? array.get(vpVol, lo - 1) : -1.0
+        float above = hi < vpRows - 1 ? array.get(vpVol, hi + 1) : -1.0
+        if above >= below
+            hi += 1
+            acc += above
+        else
+            lo -= 1
+            acc += below
+    vaLoIdx := lo
+    vaHiIdx := hi
+    vpPOC := vpLo + step * (pocIdx + 0.5)
+    vpVAH := vpLo + step * (hi + 1)
+    vpVAL := vpLo + step * lo
+
+// Konfirmasi VP: harga diterima di atas/bawah POC, atau reclaim VAL/VAH
+bool bullVP = not na(vpPOC) and (close > vpPOC or (low <= vpVAL and close > vpVAL))
+bool bearVP = not na(vpPOC) and (close < vpPOC or (high >= vpVAH and close < vpVAH))
+
+// Gambar profil hanya pada bar terakhir
+var array<box>  vpBoxes = array.new<box>()
+var array<line> vpLines = array.new<line>()
+
+if barstate.islast and showVP and not na(vpPOC)
+    for bx in vpBoxes
+        box.delete(bx)
+    for ln in vpLines
+        line.delete(ln)
+    array.clear(vpBoxes)
+    array.clear(vpLines)
+
+    float stepD = (vpHi - vpLo) / vpRows
+    float maxV = array.max(vpVol)
+    int x0 = bar_index - vpBars
+    for r = 0 to vpRows - 1
+        float v = array.get(vpVol, r)
+        int w = math.max(1, int(math.round(v / maxV * vpBars * vpWidth / 100.0)))
+        bool inVA = r >= vaLoIdx and r <= vaHiIdx
+        color c = r == pocIdx ? color.new(color.yellow, 40) : inVA ? color.new(color.blue, 70) : color.new(color.gray, 80)
+        array.push(vpBoxes, box.new(x0, vpLo + stepD * (r + 1), x0 + w, vpLo + stepD * r, border_color=color.new(color.white, 100), bgcolor=c))
+    array.push(vpLines, line.new(x0, vpPOC, bar_index, vpPOC, extend=extend.right, color=color.yellow, width=2))
+    array.push(vpLines, line.new(x0, vpVAH, bar_index, vpVAH, extend=extend.right, color=color.new(color.blue, 20), style=line.style_dashed))
+    array.push(vpLines, line.new(x0, vpVAL, bar_index, vpVAL, extend=extend.right, color=color.new(color.blue, 20), style=line.style_dashed))
+
+//====================================================
+// KONFIRMASI DALAM JENDELA (event-based)
+//====================================================
+bool bullStructR = f_recent(bullBosEvt or bullChochEvt, sigWin)
+bool bearStructR = f_recent(bearBosEvt or bearChochEvt, sigWin)
+bool bullSweepR  = f_recent(bullSweep, sigWin)
+bool bearSweepR  = f_recent(bearSweep, sigWin)
+bool bullFVGR    = f_recent(bullFVG, sigWin)
+bool bearFVGR    = f_recent(bearFVG, sigWin)
+bool bullOBR     = f_recent(inBullOB, sigWin)
+bool bearOBR     = f_recent(inBearOB, sigWin)
+
+//====================================================
+// SCORE (kualitas konfluensi, total 100)
+// Filter keras (arah tren, ZLEMA, HTF, ADX) TIDAK ikut dihitung agar tidak redundan.
+//====================================================
+float buyScore = 0.0
+buyScore += bullStructR ? 25 : 0
+buyScore += volFilter ? 15 : 0
+buyScore += atrExpansion ? 10 : 0
+buyScore += bullSweepR ? 15 : 0
+buyScore += bullFVGR ? 10 : 0
+buyScore += bullOBR ? 15 : 0
+buyScore += bullVP ? 10 : 0
+
+float sellScore = 0.0
+sellScore += bearStructR ? 25 : 0
+sellScore += volFilter ? 15 : 0
+sellScore += atrExpansion ? 10 : 0
+sellScore += bearSweepR ? 15 : 0
+sellScore += bearFVGR ? 10 : 0
+sellScore += bearOBR ? 15 : 0
+sellScore += bearVP ? 10 : 0
+
+//====================================================
+// SINYAL (filter keras + trigger struktur + skor, edge trigger, bar tutup)
+//====================================================
+bool buyCond = bullTrend and close > zema and (not useHTF or htfBull) and (not useADX or adxBull) and bullStructR and buyScore >= minScore
+bool sellCond = bearTrend and close < zema and (not useHTF or htfBear) and (not useADX or adxBear) and bearStructR and sellScore >= minScore
+
+bool buySignal  = buyCond and not (buyCond[1] == true) and barstate.isconfirmed
+bool sellSignal = sellCond and not (sellCond[1] == true) and barstate.isconfirmed
+
+//====================================================
+// SL / TP / POSITION SIZING
+//====================================================
+float swSLb = not na(lastSwingLow) and lastSwingLow < close ? lastSwingLow - atrValue * slBuf : close - atrValue * slMult
+float slB   = math.max(swSLb, close - atrValue * maxSL)
+float tpB   = close + (close - slB) * rr
+
+float swSLs = not na(lastSwingHigh) and lastSwingHigh > close ? lastSwingHigh + atrValue * slBuf : close + atrValue * slMult
+float slS   = math.min(swSLs, close + atrValue * maxSL)
+float tpS   = close - (slS - close) * rr
+
+float lotsB = (close - slB) > 0 ? (equity * riskPct / 100.0) / ((close - slB) * contractSize) : na
+float lotsS = (slS - close) > 0 ? (equity * riskPct / 100.0) / ((slS - close) * contractSize) : na
+
+var string lastDir = "-"
+var float lastEntry = na
+var float lastSL = na
+var float lastTP = na
+var float lastLots = na
+var float lastScore = na
+
+if buySignal
+    lastDir := "BUY"
+    lastEntry := close
+    lastSL := slB
+    lastTP := tpB
+    lastLots := lotsB
+    lastScore := buyScore
+    if showLabels
+        label.new(bar_index, low, "BUY\nScore " + str.tostring(buyScore, "#"), style=label.style_label_up, color=color.green, textcolor=color.white)
+    if showLevels
+        line.new(bar_index, close, bar_index + 20, close, color=color.gray, style=line.style_dotted)
+        line.new(bar_index, slB, bar_index + 20, slB, color=color.red)
+        line.new(bar_index, tpB, bar_index + 20, tpB, color=color.green)
+
+if sellSignal
+    lastDir := "SELL"
+    lastEntry := close
+    lastSL := slS
+    lastTP := tpS
+    lastLots := lotsS
+    lastScore := sellScore
+    if showLabels
+        label.new(bar_index, high, "SELL\nScore " + str.tostring(sellScore, "#"), style=label.style_label_down, color=color.red, textcolor=color.white)
+    if showLevels
+        line.new(bar_index, close, bar_index + 20, close, color=color.gray, style=line.style_dotted)
+        line.new(bar_index, slS, bar_index + 20, slS, color=color.red)
+        line.new(bar_index, tpS, bar_index + 20, tpS, color=color.green)
+
+//====================================================
+// BACKGROUND
+//====================================================
+bgcolor(showBg ? (bullTrend ? color.new(color.green, 95) : bearTrend ? color.new(color.red, 95) : na) : na)
+
+//====================================================
+// PLOT TERSEMBUNYI UNTUK ALERT (skor, SL, TP)
+//====================================================
+plot(buyScore,  "Buy Score",  display=display.none)
+plot(sellScore, "Sell Score", display=display.none)
+plot(slB, "Buy SL",  display=display.none)
+plot(tpB, "Buy TP",  display=display.none)
+plot(slS, "Sell SL", display=display.none)
+plot(tpS, "Sell TP", display=display.none)
+
+//====================================================
+// ALERT (pilih "Once Per Bar Close")
+//====================================================
+alertcondition(buySignal, title="QiPrime BUY", message='{"signal":"BUY","ticker":"{{ticker}}","price":{{close}},"score":{{plot("Buy Score")}},"sl":{{plot("Buy SL")}},"tp":{{plot("Buy TP")}},"tf":"{{interval}}"}')
+alertcondition(sellSignal, title="QiPrime SELL", message='{"signal":"SELL","ticker":"{{ticker}}","price":{{close}},"score":{{plot("Sell Score")}},"sl":{{plot("Sell SL")}},"tp":{{plot("Sell TP")}},"tf":"{{interval}}"}')
+
+//====================================================
+// TABEL INFO
+//====================================================
+var table tbl = table.new(position.top_right, 2, 12, border_width=1, frame_color=color.gray, frame_width=1)
+
+f_cell(int r, string k, string v, color vc) =>
+    table.cell(tbl, 0, r, k, text_color=color.white, bgcolor=color.new(color.black, 15), text_halign=text.align_left, text_size=size.small)
+    table.cell(tbl, 1, r, v, text_color=vc, bgcolor=color.new(color.black, 15), text_halign=text.align_right, text_size=size.small)
+
+if barstate.islast and showTable
+    f_cell(0, "Preset / Min Score", preset + " / " + str.tostring(minScore), color.white)
+    f_cell(1, "Supertrend", bullTrend ? "Bullish" : "Bearish", bullTrend ? color.lime : color.red)
+    f_cell(2, "Struktur", structure == 1 ? "Bullish" : structure == -1 ? "Bearish" : "-", structure == 1 ? color.lime : structure == -1 ? color.red : color.gray)
+    f_cell(3, "HTF EMA200", htfBull ? "Di atas" : "Di bawah", htfBull ? color.lime : color.red)
+    f_cell(4, "ADX", str.tostring(adxVal, "#.0"), adxVal > adxMin ? color.lime : color.orange)
+    f_cell(5, "Score Buy / Sell", str.tostring(buyScore, "#") + " / " + str.tostring(sellScore, "#"), color.white)
+    f_cell(6, "VP POC", na(vpPOC) ? "-" : str.tostring(vpPOC, format.mintick), color.yellow)
+    f_cell(7, "VP VAH / VAL", na(vpVAH) ? "-" : str.tostring(vpVAH, format.mintick) + " / " + str.tostring(vpVAL, format.mintick), color.aqua)
+    f_cell(8, "Sinyal terakhir", lastDir + (na(lastScore) ? "" : " (" + str.tostring(lastScore, "#") + ")"), lastDir == "BUY" ? color.lime : lastDir == "SELL" ? color.red : color.gray)
+    f_cell(9, "Entry / SL", na(lastEntry) ? "-" : str.tostring(lastEntry, format.mintick) + " / " + str.tostring(lastSL, format.mintick), color.white)
+    f_cell(10, "TP (RR " + str.tostring(rr, "#.0") + ")", na(lastTP) ? "-" : str.tostring(lastTP, format.mintick), color.white)
+    f_cell(11, "Lot (risiko " + str.tostring(riskPct, "#.0#") + "%)", na(lastLots) ? "-" : str.tostring(lastLots, "#.00"), color.white)
