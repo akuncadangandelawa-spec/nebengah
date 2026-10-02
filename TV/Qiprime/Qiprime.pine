@@ -1,0 +1,119 @@
+//@version=5
+indicator("QiPrime | Donchian + ADX + ATR Signals", shorttitle="QP-DCX-ATR", overlay=true, max_labels_count=500)
+
+// ══════════════════ INPUTS ══════════════════
+g1 = "1. Donchian Channel"
+dcLen     = input.int(20, "Panjang Donchian (N)", minval=5, group=g1)
+dcSrc     = input.source(close, "Sumber breakout", group=g1)
+showBasis = input.bool(true, "Tampilkan basis (mid-line)", group=g1)
+
+g2 = "2. ADX / DMI Filter"
+diLen   = input.int(14, "Panjang DI",  minval=2, group=g2)
+adxLen  = input.int(14, "Panjang ADX", minval=2, group=g2)
+adxThr  = input.int(20, "Ambang ADX (tren valid)", minval=1, group=g2)
+adxRise = input.bool(false, "Wajib ADX naik (ADX > ADX[1])", group=g2)
+
+g3 = "3. ATR & Manajemen Risiko"
+atrLen    = input.int(14, "Panjang ATR", minval=1, group=g3)
+slMult    = input.float(1.5, "Stop Loss (x ATR)", step=0.1, group=g3)
+tpMult    = input.float(3.0, "Take Profit (x ATR)", step=0.1, group=g3)
+trailMult = input.float(2.0, "Trailing Stop (x ATR)", step=0.1, group=g3)
+trailOn   = input.bool(true, "Aktifkan trailing stop ATR", group=g3)
+volOn     = input.bool(true, "Filter volatilitas (ATR > SMA ATR)", group=g3)
+volLen    = input.int(50, "Periode SMA ATR", minval=5, group=g3)
+
+g4 = "4. Sinyal & Tampilan"
+onePerTrend = input.bool(true, "Hanya 1 sinyal per tren (anti spam)", group=g4)
+showLabels  = input.bool(true, "Tampilkan label entry/exit", group=g4)
+showInfo    = input.bool(true, "Tampilkan panel info", group=g4)
+
+// ══════════════════ PERHITUNGAN ══════════════════
+upper = ta.highest(high, dcLen)
+lower = ta.lowest(low, dcLen)
+basis = (upper + lower) * 0.5
+
+[diPlus, diMinus, adx] = ta.dmi(diLen, adxLen)
+atr   = ta.atr(atrLen)
+atrMa = ta.sma(atr, volLen)
+volOk = volOn ? atr > atrMa : true
+
+brkUp = ta.crossover(dcSrc, upper[1])
+brkDn = ta.crossunder(dcSrc, lower[1])
+
+trendUp = adx >= adxThr and diPlus > diMinus and (not adxRise or adx > adx[1])
+trendDn = adx >= adxThr and diMinus > diPlus and (not adxRise or adx > adx[1])
+
+var int   pos     = 0
+var float entryPx = na
+var float slPx    = na
+var float tpPx    = na
+var float trailPx = na
+
+longRaw  = brkUp and trendUp and volOk
+shortRaw = brkDn and trendDn and volOk
+
+longSig  = longRaw  and (not onePerTrend or pos != 1)
+shortSig = shortRaw and (not onePerTrend or pos != -1)
+
+// ══════════════════ STATE: ENTRY ══════════════════
+if longSig
+    pos     := 1
+    entryPx := close
+    slPx    := close - slMult * atr
+    tpPx    := close + tpMult * atr
+    trailPx := close - trailMult * atr
+else if shortSig
+    pos     := -1
+    entryPx := close
+    slPx    := close + slMult * atr
+    tpPx    := close - tpMult * atr
+    trailPx := close + trailMult * atr
+
+// Trailing update
+if trailOn and pos == 1
+    trailPx := math.max(nz(trailPx), close - trailMult * atr)
+if trailOn and pos == -1
+    trailPx := math.min(nz(trailPx), close + trailMult * atr)
+
+// ══════════════════ STATE: EXIT ══════════════════
+exitLong  = pos == 1  and (close <= slPx or close >= tpPx or close < lower[1] or (trailOn and close <= trailPx))
+exitShort = pos == -1 and (close >= slPx or close <= tpPx or close > upper[1] or (trailOn and close >= trailPx))
+
+if exitLong or exitShort
+    pos := 0
+
+// ══════════════════ PLOT ══════════════════
+pU = plot(upper, "Donchian Upper", color=color.new(#2e86ab, 10))
+pL = plot(lower, "Donchian Lower", color=color.new(#c0392b, 10))
+fill(pU, pL, color=color.new(#2e86ab, 92), title="Channel Fill")
+
+plot(showBasis ? basis : na, "Basis", color=color.new(#95a5a6, 30), style=plot.style_circles)
+plot(pos != 0 ? slPx    : na, "Stop Loss",   color=color.new(#e74c3c, 0), linewidth=2, style=plot.style_linebr)
+plot(pos != 0 ? tpPx    : na, "Take Profit", color=color.new(#27ae60, 0), linewidth=2, style=plot.style_linebr)
+plot(trailOn and pos != 0 ? trailPx : na, "Trailing ATR", color=color.new(#e67e22, 0), linewidth=1, style=plot.style_linebr)
+
+// ══════════════════ LABEL ══════════════════
+plotshape(showLabels and longSig,  title="LONG",  style=shape.labelup,   location=location.belowbar,  color=color.new(#27ae60, 0), text="LONG",  textcolor=color.white, size=size.small)
+plotshape(showLabels and shortSig, title="SHORT", style=shape.labeldown, location=location.abovebar,  color=color.new(#e74c3c, 0), text="SHORT", textcolor=color.white, size=size.small)
+plotshape(showLabels and (exitLong or exitShort), title="EXIT", style=shape.xcross, location=location.abovebar, color=color.new(#f1c40f, 0), size=size.tiny)
+
+// ══════════════════ PANEL INFO ══════════════════
+var table panel = table.new(position.top_right, 2, 5, bgcolor=color.new(#0f172a, 15), border_width=1, border_color=color.new(#7f8c8d, 60))
+if showInfo and barstate.islast
+    regime = adx >= adxThr ? (diPlus > diMinus ? "BULL TREND" : "BEAR TREND") : "RANGING"
+    regCol = adx >= adxThr ? (diPlus > diMinus ? #2ecc71 : #e74c3c) : #f39c12
+    table.cell(panel, 0, 0, "ADX",       text_color=color.white, text_size=size.small)
+    table.cell(panel, 1, 0, str.tostring(adx, "#.0"), text_color=adx >= adxThr ? #2ecc71 : #f39c12, text_size=size.small)
+    table.cell(panel, 0, 1, "ATR",       text_color=color.white, text_size=size.small)
+    table.cell(panel, 1, 1, str.tostring(atr, "#.####"), text_color=color.white, text_size=size.small)
+    table.cell(panel, 0, 2, "Volatilitas", text_color=color.white, text_size=size.small)
+    table.cell(panel, 1, 2, volOk ? "NORMAL" : "REDAH", text_color=volOk ? #2ecc71 : #f39c12, text_size=size.small)
+    table.cell(panel, 0, 3, "Regime",    text_color=color.white, text_size=size.small)
+    table.cell(panel, 1, 3, regime,      text_color=regCol, text_size=size.small)
+    table.cell(panel, 0, 4, "Posisi",    text_color=color.white, text_size=size.small)
+    table.cell(panel, 1, 4, pos == 1 ? "LONG" : pos == -1 ? "SHORT" : "FLAT", text_color=color.white, text_size=size.small)
+
+// ══════════════════ ALERT ══════════════════
+alertcondition(longSig,  title="LONG Entry",  message="QP SIGNAL: LONG breakout | {{ticker}} @ {{close}} | TF {{interval}}")
+alertcondition(shortSig, title="SHORT Entry", message="QP SIGNAL: SHORT breakdown | {{ticker}} @ {{close}} | TF {{interval}}")
+alertcondition(exitLong or exitShort, title="EXIT", message="QP SIGNAL: EXIT / INVALIDASI | {{ticker}} @ {{close}} | TF {{interval}}")
