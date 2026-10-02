@@ -1,0 +1,292 @@
+//@version=6
+strategy(title='Sniper & Strategy (v6 Clean FVG No Warnings)', shorttitle='Sniper Algo FVG', overlay=true, pyramiding=0, initial_capital=100, currency=currency.USD)
+
+//==================== SCORING & FILTER INPUTS ======================//
+grp_score     = "Signal Scoring Settings"
+min_score_req = input.int(40, title="Minimum Score Threshold for Signal", step=20, minval=20, maxval=100, group=grp_score)
+show_early    = input.bool(true, title="Enable Early Signal Detection (Warning)", group=grp_score)
+
+grp_filters   = "Enable / Disable Individual Filters (20 Pts Each)"
+use_htf       = input.bool(true, title="HTF 720m Filter", group=grp_filters)
+use_st        = input.bool(true, title="Supertrend Filter", group=grp_filters)
+use_rsi       = input.bool(true, title="RSI Filter", group=grp_filters)
+use_ema       = input.bool(true, title="EMA Alignment Filter", group=grp_filters)
+use_macd      = input.bool(true, title="MACD Momentum Filter", group=grp_filters)
+
+grp_rsi       = "RSI Settings"
+rsi_len       = input.int(14, title="RSI Length", minval=1, group=grp_rsi)
+rsi_src       = input.source(close, title="RSI Source", group=grp_rsi)
+rsi_ob        = input.float(70.0, title="RSI Overbought Level", group=grp_rsi)
+rsi_os        = input.float(30.0, title="RSI Oversold Level", group=grp_rsi)
+
+//==================== FVG HTF PARAMETERS ======================//
+grp_fvg       = "HTF Fair Value Gap (FVG) Settings"
+show_fvg15    = input.bool(true, title="Enable M15 FVG", group=grp_fvg)
+show_fvg30    = input.bool(true, title="Enable M30 FVG", group=grp_fvg)
+show_fvg60    = input.bool(true, title="Enable H1 FVG", group=grp_fvg)
+fvg_transp    = input.int(90, title="FVG Color Transparency (0-100)", minval=0, maxval=100, group=grp_fvg)
+
+//==================== RISK MANAGEMENT INPUTS ======================//
+grp_risk      = "Risk & Position Management (ATR Based)"
+use_sl_tp     = input.bool(true, title="Enable ATR SL / TP", group=grp_risk)
+atr_risk_len  = input.int(14, title="ATR Length for SL/TP", group=grp_risk)
+sl_multiplier = input.float(1.5, title="Stop Loss Multiplier (x ATR)", step=0.1, group=grp_risk)
+tp_multiplier = input.float(2.2, title="Take Profit Multiplier (x ATR)", step=0.1, group=grp_risk)
+use_trailing  = input.bool(true, title="Enable Trailing Stop", group=grp_risk)
+trail_offset_mult = input.float(1.0, title="Trailing Offset (x ATR)", step=0.1, group=grp_risk)
+
+grp_time      = "Trading Session Filter"
+use_session   = input.bool(false, title="Enable Session Filter", group=grp_time)
+trade_session = input.session("0800-2200", title="Allowed Trading Session", group=grp_time)
+
+in_session    = not use_session or not na(time(timeframe.period, trade_session))
+
+//==================== Visual EMA & Bar Colors ======================//
+mysignal = ta.ema(close, 13) - ta.ema(close, 26)
+barcolor(mysignal > mysignal[1] ? color.green : color.red)
+
+src0 = close
+len0 = input.int(13, minval=1, title="EMA 1")
+ema0 = ta.ema(src0, len0)
+
+ema0_rising  = ta.rising(ema0, 2)
+ema0_falling = ta.falling(ema0, 2)
+direction    = ema0_rising ? 1 : ema0_falling ? -1 : 0
+plot_color   = direction > 0 ? color.lime : direction < 0 ? color.red : color(na)
+plot(ema0, title="EMA 1", style=plot.style_line, linewidth=2, color=plot_color)
+
+src02 = close
+len02 = input.int(21, minval=1, title="EMA 2")
+ema02 = ta.ema(src02, len02)
+
+ema02_rising  = ta.rising(ema02, 2)
+ema02_falling = ta.falling(ema02, 2)
+direction2    = ema02_rising ? 1 : ema02_falling ? -1 : 0
+plot_color2   = direction2 > 0 ? color.lime : direction2 < 0 ? color.red : color(na)
+plot(ema02, title="EMA Signal 2", style=plot.style_line, linewidth=2, color=plot_color2)
+
+//============= Hull MA ================================//
+show_hma = input.bool(false, title="Display Hull MA Set:")
+hma_src = input.source(close, title="Hull MA's Source:")
+hma_base_length = input.int(8, minval=1, title="Hull MA's Base Length:")
+hma_length_scalar = input.int(5, minval=0, title="Hull MA's Length Scalar:")
+
+hullma(src, length) =>
+    wma_half = ta.wma(src, math.round(length / 2))
+    wma_full = ta.wma(src, length)
+    ta.wma(2 * wma_half - wma_full, math.round(math.sqrt(length)))
+
+hma_len = hma_base_length + hma_length_scalar * 6
+plot(not show_hma ? na : hullma(hma_src, hma_len), color=color.black, linewidth=2, title="Hull MA")
+
+//============ Supertrend Indicator ====================//
+Factor = input.float(1.0, minval=1.0, title="Trend Transition Signal Factor")
+Pd     = input.int(1, minval=1, maxval=100, title="ATR Period")
+
+Up = hl2 - (Factor * ta.atr(Pd))
+Dn = hl2 + (Factor * ta.atr(Pd))
+
+var float TrendUp = na
+var float TrendDown = na
+var int Trend = 0
+
+prevTrendUp   = nz(TrendUp[1], Up)
+prevTrendDown = nz(TrendDown[1], Dn)
+
+TrendUp   := close[1] > prevTrendUp ? math.max(Up, prevTrendUp) : Up
+TrendDown := close[1] < prevTrendDown ? math.min(Dn, prevTrendDown) : Dn
+Trend     := close > prevTrendDown ? 1 : close < prevTrendUp ? -1 : nz(Trend[1], 0)
+
+//============ RSI Calculation ====================//
+rsi_val = ta.rsi(rsi_src, rsi_len)
+
+//============ HTF Security Data ==================//
+periodInput = input.timeframe('720', title="Higher Timeframe")
+
+f_htf_data() => [open[1], close[1]]
+[htf_open, htf_close] = request.security(syminfo.tickerid, periodInput, f_htf_data(), lookahead=barmerge.lookahead_off)
+
+htf_long  = ta.crossover(htf_close, htf_open)
+htf_short = ta.crossunder(htf_close, htf_open)
+
+//============ TEMA & DEMA Trigger ==================//
+slow = 8
+fast = 5
+vh1 = ta.ema(ta.highest(math.avg(low, close), fast), 5)
+vl1 = ta.ema(ta.lowest(math.avg(high, close), slow), 8)
+
+e_ema1 = ta.ema(close, 1)
+e_ema2 = ta.ema(e_ema1, 1)
+e_ema3 = ta.ema(e_ema2, 1)
+tema   = (e_ema1 - e_ema2) + e_ema3
+
+e_e1 = ta.ema(close, 8)
+e_e2 = ta.ema(e_e1, 5)
+dema = 2 * e_e1 - e_e2
+
+signal_line = tema > dema ? math.max(vh1, vl1) : math.min(vh1, vl1)
+
+raw_call = (tema[1] > dema[1]) and (signal_line[1] > low[1]) and ((signal_line[1] - signal_line[2]) > (signal_line[2] - signal_line[3]))
+raw_put  = (tema[1] < dema[1]) and (signal_line[1] < high[1]) and ((signal_line[2] - signal_line[1]) > (signal_line[3] - signal_line[2]))
+
+//==================== SCORING EVALUATION ======================//
+buy_score = 0
+if raw_call
+    buy_score := buy_score + (use_htf and htf_long ? 20 : 0)
+    buy_score := buy_score + (use_st and Trend == 1 ? 20 : 0)
+    buy_score := buy_score + (use_rsi and rsi_val[1] < rsi_ob ? 20 : 0)
+    buy_score := buy_score + (use_ema and ema0[1] > ema02[1] ? 20 : 0)
+    buy_score := buy_score + (use_macd and mysignal[1] > mysignal[2] ? 20 : 0)
+
+sell_score = 0
+if raw_put
+    sell_score := sell_score + (use_htf and htf_short ? 20 : 0)
+    sell_score := sell_score + (use_st and Trend == -1 ? 20 : 0)
+    sell_score := sell_score + (use_rsi and rsi_val[1] > rsi_os ? 20 : 0)
+    sell_score := sell_score + (use_ema and ema0[1] < ema02[1] ? 20 : 0)
+    sell_score := sell_score + (use_macd and mysignal[1] < mysignal[2] ? 20 : 0)
+
+valid_buy  = raw_call and (buy_score >= min_score_req) and in_session
+valid_sell = raw_put and (sell_score >= min_score_req) and in_session
+
+// Early Detection
+early_buy_condition  = ta.crossover(tema, dema) and not valid_buy and in_session
+early_sell_condition = ta.crossunder(tema, dema) and not valid_sell and in_session
+
+//==================== STRATEGY EXECUTION & DYNAMIC RISK ======================//
+atr_val = ta.atr(atr_risk_len)
+
+var float long_sl  = na
+var float long_tp  = na
+var float short_sl = na
+var float short_tp = na
+
+if (valid_buy)
+    long_sl := close - (atr_val * sl_multiplier)
+    long_tp := close + (atr_val * tp_multiplier)
+    strategy.entry("COMPRE", strategy.long)
+    if use_sl_tp
+        strategy.exit("TP/SL Long", "COMPRE", stop=long_sl, limit=long_tp, trail_points=use_trailing ? math.round(atr_val * trail_offset_mult / syminfo.mintick) : na, trail_offset=use_trailing ? math.round(atr_val * 0.5 / syminfo.mintick) : na)
+
+if (valid_sell)
+    short_sl := close + (atr_val * sl_multiplier)
+    short_tp := close - (atr_val * tp_multiplier)
+    strategy.entry("VENDA", strategy.short)
+    if use_sl_tp
+        strategy.exit("TP/SL Short", "VENDA", stop=short_sl, limit=short_tp, trail_points=use_trailing ? math.round(atr_val * trail_offset_mult / syminfo.mintick) : na, trail_offset=use_trailing ? math.round(atr_val * 0.5 / syminfo.mintick) : na)
+
+//==================== ACCURATE FVG SYSTEM (AUTO-DELETE MITIGATED) ======================//
+f_fvg_calc() =>
+    b_fvg = (low[1] > high[3])
+    s_fvg = (high[1] < low[3])
+    [b_fvg, s_fvg, high[3], low[1], low[3], high[1], time[3]]
+
+type FvgZone
+    box   box_obj
+    float top
+    float bottom
+    bool  is_bullish
+
+var FvgZone[] fvg_array = array.new<FvgZone>()
+
+f_process_fvg(string tf, bool enabled) =>
+    [bullish_fvg, bearish_fvg, b_top_h3, b_bot_l1, s_top_l3, s_bot_h1, fvg_time] = request.security(syminfo.tickerid, tf, f_fvg_calc(), lookahead=barmerge.lookahead_off)
+    fvg_time_change = ta.change(fvg_time)
+    bool is_new_htf_bar = not na(fvg_time) and fvg_time_change != 0
+
+    if enabled and is_new_htf_bar
+        if bullish_fvg
+            box b = box.new(left=fvg_time, top=b_bot_l1, right=time, bottom=b_top_h3, xloc=xloc.bar_time,
+                            bgcolor=color.new(color.green, fvg_transp), border_color=color.new(color.green, 70), 
+                            text=tf + "m FVG", text_size=size.tiny, text_color=color.new(color.green, 20))
+            array.push(fvg_array, FvgZone.new(b, b_bot_l1, b_top_h3, true))
+
+        if bearish_fvg
+            box s = box.new(left=fvg_time, top=s_top_l3, right=time, bottom=s_bot_h1, xloc=xloc.bar_time,
+                            bgcolor=color.new(color.red, fvg_transp), border_color=color.new(color.red, 70), 
+                            text=tf + "m FVG", text_size=size.tiny, text_color=color.new(color.red, 20))
+            array.push(fvg_array, FvgZone.new(s, s_top_l3, s_bot_h1, false))
+
+f_process_fvg('15', show_fvg15)
+f_process_fvg('30', show_fvg30)
+f_process_fvg('60', show_fvg60)
+
+// Manajemen Array: Perpanjang FVG Aktif & Hapus Otomatis jika Termitigasi
+if array.size(fvg_array) > 0
+    int time_step = math.max(1, nz(time - time[1], 60000))
+    int future_time = time + (time_step * 10)
+    
+    for i = array.size(fvg_array) - 1 to 0
+        FvgZone zone = array.get(fvg_array, i)
+        
+        bool is_mitigated = false
+        if zone.is_bullish
+            is_mitigated := low < zone.bottom
+        else
+            is_mitigated := high > zone.top
+
+        if is_mitigated
+            box.delete(zone.box_obj)
+            array.remove(fvg_array, i)
+        else
+            box.set_right(zone.box_obj, future_time)
+
+//============ LABELS DISPLAY ==================//
+if valid_buy
+    label.new(
+         bar_index - 1, 
+         low[1], 
+         text="▲ BUY (+" + str.tostring(buy_score) + ")", 
+         yloc=yloc.belowbar, 
+         color=color.green, 
+         textcolor=color.white, 
+         style=label.style_label_up, 
+         size=size.small
+     )
+
+if valid_sell
+    label.new(
+         bar_index - 1, 
+         high[1], 
+         text="▼ SELL (+" + str.tostring(sell_score) + ")", 
+         yloc=yloc.abovebar, 
+         color=color.red, 
+         textcolor=color.white, 
+         style=label.style_label_down, 
+         size=size.small
+     )
+
+if show_early and early_buy_condition
+    label.new(
+         bar_index, 
+         low - (atr_val * 0.8), 
+         text="READY BUY ⚠️", 
+         yloc=yloc.price, 
+         color=color.orange, 
+         textcolor=color.black, 
+         style=label.style_label_up, 
+         size=size.tiny
+     )
+
+if show_early and early_sell_condition
+    label.new(
+         bar_index, 
+         high + (atr_val * 0.8), 
+         text="READY SELL ⚠️", 
+         yloc=yloc.price, 
+         color=color.orange, 
+         textcolor=color.black, 
+         style=label.style_label_down, 
+         size=size.tiny
+     )
+
+//============ Directional Projection ==================//
+tf2   = input.timeframe('1', title="Trend Projection TF / Mins/D/W")
+P2    = input.float(13.00, title="Projection Box Size")
+W2    = input.int(1, title="Reversal Amount")
+
+pf2   = ticker.pointfigure(syminfo.tickerid, 'close', 'ATR', P2, W2)
+spfc2 = request.security(pf2, tf2, close[1], lookahead=barmerge.lookahead_off)
+
+channel3 = input.bool(false, title="Connect Projection High/Low")
+plot(channel3 ? spfc2 : spfc2 == nz(spfc2[1]) ? spfc2 : na, color=color.blue, linewidth=2, style=plot.style_linebr, title="Projection")
