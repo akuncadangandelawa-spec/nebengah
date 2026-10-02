@@ -1,0 +1,105 @@
+//@version=6
+indicator("QiPrime BB + RSI Ranging Strategy [SCORING]", overlay=true, max_labels_count=500)
+
+// ==========================================
+// 1. INPUT PARAMETERS
+// ==========================================
+// Bollinger Bands
+bbLength = input.int(20, title="BB Length", group="Bollinger Bands")
+bbMult = input.float(2.0, title="BB Multiplier", step=0.1, group="Bollinger Bands")
+
+// RSI
+rsiLength = input.int(14, title="RSI Length", group="RSI")
+rsiOB = input.float(70, title="RSI Overbought", group="RSI")
+rsiOS = input.float(30, title="RSI Oversold", group="RSI")
+
+// Scoring & Filter Inputs
+volMult = input.float(1.5, title="Volume Spike Multiplier (vs SMA 20)", step=0.1, group="Scoring Logic")
+wickThreshold = input.float(0.5, title="Minimum Wick Ratio (0.5 = 50%)", step=0.1, group="Scoring Logic")
+adxDeepRange = input.float(20.0, title="ADX Threshold for Deep Ranging (+1 Pt)", step=1.0, group="Scoring Logic")
+
+// Visuals
+showLabels = input.bool(true, title="Tampilkan Label Scoring", group="Visual")
+
+// ==========================================
+// 2. PERHITUNGAN INDIKATOR
+// ==========================================
+// BB & RSI
+basis = ta.sma(close, bbLength)
+dev = bbMult * ta.stdev(close, bbLength)
+upperBand = basis + dev
+lowerBand = basis - dev
+rsi = ta.rsi(close, rsiLength)
+
+// ADX & Volume
+[diplus, diminus, adx] = ta.dmi(14, 14)
+volSma = ta.sma(volume, 20)
+
+// ==========================================
+// 3. LOGIC STRATEGI & SCORING
+// ==========================================
+// Base Conditions
+priceBreakoutBuy = close[1] < lowerBand[1] and close > lowerBand
+rsiRecoveryBuy = ta.crossover(rsi, rsiOS)
+baseBuy = priceBreakoutBuy and rsiRecoveryBuy
+
+priceBreakoutSell = close[1] > upperBand[1] and close < upperBand
+rsiRecoverySell = ta.crossunder(rsi, rsiOB)
+baseSell = priceBreakoutSell and rsiRecoverySell
+
+// Scoring Logic
+int buyScore = 0
+int sellScore = 0
+
+// Hitung Score BUY
+if baseBuy
+    buyScore := 2 // Base score
+    if volume > (volSma * volMult)
+        buyScore += 1
+    if (high - low) > 0 and (math.min(open, close) - low) > (high - low) * wickThreshold
+        buyScore += 1
+    if adx < adxDeepRange
+        buyScore += 1
+
+// Hitung Score SELL
+if baseSell
+    sellScore := 2 // Base score
+    if volume > (volSma * volMult)
+        sellScore += 1
+    if (high - low) > 0 and (high - math.max(open, close)) > (high - low) * wickThreshold
+        sellScore += 1
+    if adx < adxDeepRange
+        sellScore += 1
+
+// ==========================================
+// 4. PLOTTING & LABELS
+// ==========================================
+// Plot BB
+p1 = plot(upperBand, color=color.new(color.red, 20), title="BB Upper")
+p2 = plot(lowerBand, color=color.new(color.green, 20), title="BB Lower")
+plot(basis, color=color.new(color.blue, 50), title="BB Basis")
+fill(p1, p2, color=color.new(color.gray, 90))
+
+// Fungsi Warna Label berdasarkan Score (Tanpa deklarasi tipe eksplisit)
+getLabelColor(int score) =>
+    if score >= 4
+        color.new(#00E676, 0) // Hijau Terang (High Conviction)
+    else if score == 3
+        color.new(#FFEA00, 0) // Kuning (Medium Conviction)
+    else
+        color.new(#FF9100, 0) // Oranye (Low Conviction / Warning)
+
+// Draw Labels
+if showLabels and baseBuy and buyScore >= 2
+    string buyText = "BUY [" + str.tostring(buyScore) + "/5]"
+    label.new(bar_index, low, text=buyText, style=label.style_label_up, color=getLabelColor(buyScore), textcolor=color.white, size=size.normal)
+
+if showLabels and baseSell and sellScore >= 2
+    string sellText = "SELL [" + str.tostring(sellScore) + "/5]"
+    label.new(bar_index, high, text=sellText, style=label.style_label_down, color=getLabelColor(sellScore), textcolor=color.white, size=size.normal)
+
+// ==========================================
+// 5. ALERTS (Hanya untuk score tinggi)
+// ==========================================
+alertcondition(baseBuy and buyScore >= 4, title="QiPrime HIGH SCORE BUY", message="🟢 QIPRIME: HIGH CONVICTION BUY [4/5 or 5/5]")
+alertcondition(baseSell and sellScore >= 4, title="QiPrime HIGH SCORE SELL", message="🔴 QIPRIME: HIGH CONVICTION SELL [4/5 or 5/5]")
