@@ -1,0 +1,73 @@
+/*backtest
+start: 2024-07-09 00:00:00
+end: 2025-07-04 08:00:00
+period: 4d
+basePeriod: 4d
+exchanges: [{"eid":"Futures_Binance","currency":"ETH_USDT"}]
+*/
+
+//@version=5
+strategy("FVG Strategy [algo ] - 0.10% TP/SL", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=10)
+
+// === INPUTS ===
+thresholdPer = input.float(0, "Threshold %", minval = 0, maxval = 100, step = .1, inline = 'threshold')
+auto = input(false, "Auto", inline = 'threshold')
+tf = input.timeframe("", "Timeframe")
+
+// SL/TP settings (0.10% each)
+sl_pct = 0.10
+tp_pct = 0.10
+
+// === TYPE ===
+type fvg
+    float max
+    float min
+    bool isbull
+    int t = time
+
+// === DETECTION FUNCTION ===
+detect() =>
+    var new_fvg = fvg.new(na, na, na, na)
+    threshold = auto ? ta.cum((high - low) / low) / bar_index : thresholdPer / 100
+
+    bull_fvg = low > high[2] and close[1] > high[2] and (low - high[2]) / high[2] > threshold
+    bear_fvg = high < low[2] and close[1] < low[2] and (low[2] - high) / high > threshold
+
+    if bull_fvg
+        new_fvg := fvg.new(low, high[2], true)
+    else if bear_fvg
+        new_fvg := fvg.new(low[2], high, false)
+
+    [bull_fvg, bear_fvg, new_fvg]
+
+// === FVG Detection ===
+[bull_fvg, bear_fvg, new_fvg] = request.security(syminfo.tickerid, tf, detect())
+
+var fvg_records = array.new<fvg>(0)
+var t = 0
+
+if (bull_fvg or bear_fvg) and new_fvg.t != t
+    array.unshift(fvg_records, new_fvg)
+    t := new_fvg.t
+
+// === ENTRY STRATEGY ===
+if array.size(fvg_records) > 0
+    latest = array.get(fvg_records, 0)
+    
+    // BUY Logic
+    if latest.isbull and close <= latest.max and close >= latest.min and strategy.position_size <= 0
+        sl = close * (1 - sl_pct / 100)
+        tp = close * (1 + tp_pct / 100)
+        strategy.entry("Buy FVG", strategy.long)
+        strategy.exit("TP/SL Long", from_entry="Buy FVG", stop=sl, limit=tp)
+    
+    // SELL Logic
+    if not latest.isbull and close >= latest.min and close <= latest.max and strategy.position_size >= 0
+        sl = close * (1 + sl_pct / 100)
+        tp = close * (1 - tp_pct / 100)
+        strategy.entry("Sell FVG", strategy.short)
+        strategy.exit("TP/SL Short", from_entry="Sell FVG", stop=sl, limit=tp)
+
+// === VISUALIZE FVG ZONES ===
+plotshape(bull_fvg, title="Bullish FVG", location=location.belowbar, color=color.green, style=shape.triangleup, size=size.small)
+plotshape(bear_fvg, title="Bearish FVG", location=location.abovebar, color=color.red, style=shape.triangledown, size=size.small)
