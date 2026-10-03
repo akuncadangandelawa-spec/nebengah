@@ -1,0 +1,74 @@
+/*backtest
+start: 2024-05-16 00:00:00
+end: 2025-05-14 08:00:00
+period: 1d
+basePeriod: 1d
+exchanges: [{"eid":"Futures_Binance","currency":"ETH_USDT"}]
+*/
+
+//@version=5
+strategy("Improved ICT Order Block Strategy", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=10)
+
+// Inputs
+atrLength = input.int(14, "ATR Length")
+atrMultiplierSL = input.float(1.5, "ATR Multiplier for SL")
+riskRewardRatio = input.float(2.5, "Risk/Reward Ratio")
+emaLength = input.int(50, "EMA Length (Trend Filter)")
+rsiLength = input.int(14, "RSI Length")
+rsiOverbought = input.float(70, "RSI Overbought Threshold")
+rsiOversold = input.float(30, "RSI Oversold Threshold")
+
+// Indicators
+atr = ta.atr(atrLength)
+emaTrend = ta.ema(close, emaLength)
+rsi = ta.rsi(close, rsiLength)
+
+// Order Blocks (simplified)
+bullishOB = (high > high[1]) ? high[1] : na
+bearishOB = (low < low[1]) ? low[1] : na
+
+var float lastBullishOB = na
+var float lastBearishOB = na
+
+if not na(bullishOB)
+    lastBullishOB := bullishOB
+if not na(bearishOB)
+    lastBearishOB := bearishOB
+
+// Entry Conditions with filters
+longCondition = close > emaTrend and rsi < rsiOverbought and ta.crossover(close, lastBullishOB)
+shortCondition = close < emaTrend and rsi > rsiOversold and ta.crossunder(close, lastBearishOB)
+
+// Entry confirmation: wait for candle close in direction
+longEntry = longCondition and close > open
+shortEntry = shortCondition and close < open
+
+// Entry prices
+var float longEntryPrice = na
+var float shortEntryPrice = na
+
+// Stop Loss and Take Profit
+longStop = lastBullishOB - atr * atrMultiplierSL
+longTake = longEntryPrice + (longEntryPrice - longStop) * riskRewardRatio
+
+shortStop = lastBearishOB + atr * atrMultiplierSL
+shortTake = shortEntryPrice - (shortStop - shortEntryPrice) * riskRewardRatio
+
+// Execute trades
+if (longEntry)
+    strategy.entry("Long", strategy.long)
+    longEntryPrice := close
+    strategy.exit("Exit Long", "Long", stop=longStop, limit=longTake)
+
+if (shortEntry)
+    strategy.entry("Short", strategy.short)
+    shortEntryPrice := close
+    strategy.exit("Exit Short", "Short", stop=shortStop, limit=shortTake)
+
+// Plot signals
+plotshape(longEntry, title="Long Entry", location=location.belowbar, color=color.green, style=shape.labelup, text="BUY")
+plotshape(shortEntry, title="Short Entry", location=location.abovebar, color=color.red, style=shape.labeldown, text="SELL")
+
+// Plot Order Blocks
+plot(lastBullishOB, title="Bullish OB", color=color.green, style=plot.style_linebr)
+plot(lastBearishOB, title="Bearish OB", color=color.red, style=plot.style_linebr)
