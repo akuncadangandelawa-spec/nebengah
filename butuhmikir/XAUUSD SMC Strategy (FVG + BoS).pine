@@ -1,0 +1,76 @@
+/*backtest
+start: 2024-07-29 00:00:00
+end: 2025-07-27 08:00:00
+period: 1d
+basePeriod: 1d
+exchanges: [{"eid":"Futures_Binance","currency":"ETH_USDT"}]
+*/
+
+//@version=5
+strategy("XAUUSD SMC Strategy (FVG + BoS)", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=10)
+
+// === INPUTS ===
+fvg_size = input.float(2.0, title="Minimum FVG Size", step=0.1)
+lookback = input.int(5, title="Structure Lookback", minval=1)
+risk_reward = input.float(2.0, title="Risk:Reward Ratio", step=0.1)
+cooldownBars = input.int(10, title="Bars Between Trades", minval=1)
+show_fvg = input.bool(true, title="Show FVG Zones")
+show_bos = input.bool(true, title="Show Break of Structure (BoS)")
+
+// === PRICE STRUCTURE ===
+high_prev = ta.highest(high, lookback)
+low_prev = ta.lowest(low, lookback)
+
+// === FVG DETECTION ===
+fvg_up = low[2] > high and (low[2] - high) >= fvg_size
+fvg_down = high[2] < low and (high - low[2]) >= fvg_size
+
+// === BoS DETECTION ===
+bos_bull = high > high_prev[1] and low > low_prev[1]
+bos_bear = low < low_prev[1] and high < high_prev[1]
+
+// === SPACING FOR VISUAL CLARITY ===
+var int lastBosBull = na
+var int lastBosBear = na
+var int lastFvgUp = na
+var int lastFvgDown = na
+
+spaceBars = 5
+
+show_bos_bull = show_bos and bos_bull and (na(lastBosBull) or bar_index - lastBosBull > spaceBars)
+show_bos_bear = show_bos and bos_bear and (na(lastBosBear) or bar_index - lastBosBear > spaceBars)
+
+show_fvg_up = show_fvg and fvg_up and (na(lastFvgUp) or bar_index - lastFvgUp > spaceBars)
+show_fvg_down = show_fvg and fvg_down and (na(lastFvgDown) or bar_index - lastFvgDown > spaceBars)
+
+if show_bos_bull
+    lastBosBull := bar_index
+if show_bos_bear
+    lastBosBear := bar_index
+if show_fvg_up
+    lastFvgUp := bar_index
+if show_fvg_down
+    lastFvgDown := bar_index
+
+// === TRADE MANAGEMENT ===
+var int lastTradeBar = na
+can_trade = na(lastTradeBar) or (bar_index - lastTradeBar > cooldownBars)
+
+long_sl = low - 2
+long_tp = close + (close - long_sl) * risk_reward
+
+short_sl = high + 2
+short_tp = close - (short_sl - close) * risk_reward
+
+// === TEMP WORKING STRATEGY ===
+if bar_index % 10 == 0 and can_trade
+    strategy.entry("BUY", strategy.long)
+    strategy.exit("TP/SL", from_entry="BUY", stop=long_sl, limit=long_tp)
+    lastTradeBar := bar_index
+
+// === VISUAL MARKERS (CLEANED SPACING) ===
+plotshape(show_fvg_up, style=shape.triangleup, location=location.belowbar, color=color.lime, size=size.small, title="FVG Up")
+plotshape(show_fvg_down, style=shape.triangledown, location=location.abovebar, color=color.red, size=size.small, title="FVG Down")
+
+plotshape(show_bos_bull, title="BoS Bull", location=location.belowbar, color=color.green, style=shape.labelup, text="BoS")
+plotshape(show_bos_bear, title="BoS Bear", location=location.abovebar, color=color.maroon, style=shape.labeldown, text="BoS")
