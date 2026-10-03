@@ -1,0 +1,357 @@
+// © AceInfinity
+//@version=6
+indicator("Realtime Non-Repaint Path", shorttitle="RT NR Path", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=50, max_bars_back=5000)
+
+//==================================================================================================
+// SECTION 1 — INPUTS
+//==================================================================================================
+src = input.source(close, "Source")
+
+reversalPct = input.float(8.0, "Path Reversal %", minval=0.1, step=0.1, tooltip="Percentage reversal from the active path extreme required to confirm a change in path direction.")
+pathResponsiveness = input.float(0.35, "Path Interpolation Responsiveness", minval=0.01, maxval=1.0, step=0.01, tooltip="Controls how quickly the causal displayed path eases toward the currently known path target. Higher values follow more closely; lower values draw a smoother path. This changes only forward interpolation and never rebuilds historical bars.")
+
+showPath = input.bool(true, "Show Non-Repaint Path")
+showConfirmedTurnLabels = input.bool(true, "Show Confirmed Turn Labels")
+showResolvedPivotLabels = input.bool(false, "Show Resolved Pivot Labels", tooltip="Shows the already-known pivot location only after the reversal has confirmed. These labels are retrospective location references; they do not change the path or confirmation timing.")
+showLiveStateLabel = input.bool(true, "Show Live State Label")
+showBackground = input.bool(true, "Show Background")
+
+lineWidthPath = input.int(3, "Path Width", minval=1, maxval=5)
+
+showStatusTable = input.bool(true, "Show 5-Page Status Table")
+statusTablePage = input.string("Summary", "Status Table Page", options=["Summary", "Signals", "Path", "Statistics", "Help"])
+
+maxStoredEvents = input.int(500, "Maximum Stored Confirmed Turns", minval=50, maxval=2000)
+
+alertTrough = input.bool(true, "Alert TROUGH / Path Up")
+alertPeak = input.bool(true, "Alert PEAK / Path Down")
+
+//==================================================================================================
+// SECTION 2 — HELPERS
+//==================================================================================================
+eps = math.max(syminfo.mintick, 1e-6)
+
+f_pctMove(float fromPx, float toPx) =>
+    fromPx == 0.0 ? 0.0 : ((toPx - fromPx) / math.abs(fromPx)) * 100.0
+
+f_absPctMove(float fromPx, float toPx) =>
+    math.abs(f_pctMove(fromPx, toPx))
+
+f_ease(float a, float b, float t) =>
+    float tc = math.max(0.0, math.min(1.0, t))
+    float te = tc * tc * (3.0 - 2.0 * tc)
+    a + (b - a) * te
+
+f_smooth01(float x) =>
+    float c = math.max(0.0, math.min(1.0, x))
+    c * c * (3.0 - 2.0 * c)
+
+f_pathStateTxt(int d) =>
+    d > 0 ? "PATH UP" : d < 0 ? "PATH DOWN" : "PATH NEUTRAL"
+
+f_signalTxt(int d) =>
+    d > 0 ? "TROUGH / PATH UP" : d < 0 ? "PEAK / PATH DOWN" : "NONE"
+
+f_trimInt(int[] a, int cap) =>
+    while array.size(a) > cap
+        array.shift(a)
+
+f_trimFloat(float[] a, int cap) =>
+    while array.size(a) > cap
+        array.shift(a)
+
+f_cell(table t, int r, string k, string v) =>
+    table.cell(t, 0, r, k, text_color=color.white, bgcolor=color.new(color.black, 0))
+    table.cell(t, 1, r, v, text_color=color.white, bgcolor=color.new(color.black, 15))
+
+//==================================================================================================
+// SECTION 3 — COMMITTED PERCENTAGE-REVERSAL PATH STATE
+//==================================================================================================
+// Only confirmed bars write these persistent states. The unfinished bar derives a preview from the
+// last committed state, so intrabar updates cannot rewrite any previously confirmed path value.
+var float committedAnchorPx = na
+var int committedAnchorBar = na
+var float committedCandidatePx = na
+var int committedCandidateBar = na
+var int committedDir = 0
+
+if bar_index == 0
+    committedAnchorPx := src
+    committedAnchorBar := bar_index
+    committedCandidatePx := src
+    committedCandidateBar := bar_index
+    committedDir := 0
+
+// Start every execution from the last committed state.
+float nextAnchorPx = nz(committedAnchorPx, src)
+int nextAnchorBar = nz(committedAnchorBar, bar_index)
+float nextCandidatePx = nz(committedCandidatePx, src)
+int nextCandidateBar = nz(committedCandidateBar, bar_index)
+int nextDir = nz(committedDir, 0)
+
+bool previewFlipUp = false
+bool previewFlipDn = false
+float resolvedPivotPx = na
+int resolvedPivotBar = na
+
+if bar_index > 0
+    if nextDir == 0
+        float moveFromAnchor = f_pctMove(nextAnchorPx, src)
+        if math.abs(moveFromAnchor) >= reversalPct
+            nextDir := moveFromAnchor > 0.0 ? 1 : -1
+            nextCandidatePx := src
+            nextCandidateBar := bar_index
+        else
+            bool fartherFromAnchor = math.abs(f_pctMove(nextAnchorPx, src)) >= math.abs(f_pctMove(nextAnchorPx, nextCandidatePx))
+            if fartherFromAnchor
+                nextCandidatePx := src
+                nextCandidateBar := bar_index
+
+    else if nextDir > 0
+        if src >= nextCandidatePx
+            nextCandidatePx := src
+            nextCandidateBar := bar_index
+        else if f_absPctMove(nextCandidatePx, src) >= reversalPct
+            resolvedPivotPx := nextCandidatePx
+            resolvedPivotBar := nextCandidateBar
+            nextAnchorPx := nextCandidatePx
+            nextAnchorBar := nextCandidateBar
+            nextDir := -1
+            nextCandidatePx := src
+            nextCandidateBar := bar_index
+            previewFlipDn := true
+
+    else
+        if src <= nextCandidatePx
+            nextCandidatePx := src
+            nextCandidateBar := bar_index
+        else if f_absPctMove(nextCandidatePx, src) >= reversalPct
+            resolvedPivotPx := nextCandidatePx
+            resolvedPivotBar := nextCandidateBar
+            nextAnchorPx := nextCandidatePx
+            nextAnchorBar := nextCandidateBar
+            nextDir := 1
+            nextCandidatePx := src
+            nextCandidateBar := bar_index
+            previewFlipUp := true
+
+// Forward-only path interpolation.
+// The target is the best extreme known at this bar. The displayed path advances recursively from
+// the previously committed path value. No later pivot can change a closed historical path value.
+var float committedPathValue = na
+float previousCommittedPath = nz(committedPathValue, nz(src[1], src))
+float pathTarget = nextCandidatePx
+
+float targetDistancePct = f_absPctMove(previousCommittedPath, pathTarget)
+float normalizedTargetDistance = math.min(1.0, targetDistancePct / math.max(reversalPct, eps))
+float easedDistance = f_smooth01(normalizedTargetDistance)
+float interpolationAlpha = math.max(0.01, math.min(1.0, pathResponsiveness * (0.35 + 0.65 * easedDistance)))
+
+float unconstrainedPath = previousCommittedPath + (pathTarget - previousCommittedPath) * interpolationAlpha
+float pathNow = unconstrainedPath
+
+// Before a percentage reversal is actually confirmed, the displayed path cannot reverse against
+// the active committed leg merely because raw price retraced. It may flatten while the candidate
+// extreme remains unchanged. Once the reversal confirms, the new leg is allowed to turn immediately.
+if not previewFlipUp and not previewFlipDn
+    if nextDir > 0
+        pathNow := math.max(previousCommittedPath, unconstrainedPath)
+    else if nextDir < 0
+        pathNow := math.min(previousCommittedPath, unconstrainedPath)
+
+bool confirmedFlipUp = barstate.isconfirmed and previewFlipUp
+bool confirmedFlipDn = barstate.isconfirmed and previewFlipDn
+bool confirmedTurn = confirmedFlipUp or confirmedFlipDn
+int confirmedTurnDir = confirmedFlipUp ? 1 : confirmedFlipDn ? -1 : 0
+
+//==================================================================================================
+// SECTION 4 — CONFIRMED EVENT LEDGER AND CAUSAL STATISTICS
+//==================================================================================================
+var int[] eventDir = array.new_int()
+var int[] eventPivotBar = array.new_int()
+var float[] eventPivotPx = array.new_float()
+var int[] eventConfirmBar = array.new_int()
+var float[] eventConfirmPx = array.new_float()
+var float[] eventReversalPct = array.new_float()
+var int[] eventDelayBars = array.new_int()
+var float[] eventCompletedLegPct = array.new_float()
+
+var int confirmedTurnCount = 0
+var int confirmedTroughCount = 0
+var int confirmedPeakCount = 0
+var float sumConfirmationDelayBars = 0.0
+var float sumConfirmedReversalPct = 0.0
+var float sumCompletedLegPct = 0.0
+var int completedLegCount = 0
+
+var float previousResolvedPivotPx = na
+
+if confirmedTurn
+    float confirmReversalPct = not na(resolvedPivotPx) ? f_absPctMove(resolvedPivotPx, src) : na
+    int confirmDelayBars = not na(resolvedPivotBar) ? math.max(bar_index - resolvedPivotBar, 0) : 0
+
+    float completedLegPct = not na(previousResolvedPivotPx) and not na(resolvedPivotPx) ? f_absPctMove(previousResolvedPivotPx, resolvedPivotPx) : na
+
+    array.push(eventDir, confirmedTurnDir)
+    array.push(eventPivotBar, resolvedPivotBar)
+    array.push(eventPivotPx, resolvedPivotPx)
+    array.push(eventConfirmBar, bar_index)
+    array.push(eventConfirmPx, src)
+    array.push(eventReversalPct, confirmReversalPct)
+    array.push(eventDelayBars, confirmDelayBars)
+    array.push(eventCompletedLegPct, completedLegPct)
+
+    f_trimInt(eventDir, maxStoredEvents)
+    f_trimInt(eventPivotBar, maxStoredEvents)
+    f_trimFloat(eventPivotPx, maxStoredEvents)
+    f_trimInt(eventConfirmBar, maxStoredEvents)
+    f_trimFloat(eventConfirmPx, maxStoredEvents)
+    f_trimFloat(eventReversalPct, maxStoredEvents)
+    f_trimInt(eventDelayBars, maxStoredEvents)
+    f_trimFloat(eventCompletedLegPct, maxStoredEvents)
+
+    confirmedTurnCount += 1
+    if confirmedTurnDir > 0
+        confirmedTroughCount += 1
+    else
+        confirmedPeakCount += 1
+
+    sumConfirmationDelayBars += confirmDelayBars
+    if not na(confirmReversalPct)
+        sumConfirmedReversalPct += confirmReversalPct
+
+    if not na(completedLegPct)
+        sumCompletedLegPct += completedLegPct
+        completedLegCount += 1
+
+    previousResolvedPivotPx := resolvedPivotPx
+
+// Confirmed bar commits the preview state. Open-bar previews never become persistent history unless
+// that same state still exists at the bar's confirmed close.
+if barstate.isconfirmed
+    committedAnchorPx := nextAnchorPx
+    committedAnchorBar := nextAnchorBar
+    committedCandidatePx := nextCandidatePx
+    committedCandidateBar := nextCandidateBar
+    committedDir := nextDir
+    committedPathValue := pathNow
+
+//==================================================================================================
+// SECTION 5 — DISPLAY
+//==================================================================================================
+color pathColor = nextDir > 0 ? color.lime : nextDir < 0 ? color.red : color.gray
+plot(showPath ? pathNow : na, "Non-Repaint Path", color=pathColor, linewidth=lineWidthPath)
+
+bgcolor(showBackground ? (nextDir > 0 ? color.new(color.green, 92) : nextDir < 0 ? color.new(color.red, 92) : color.new(color.gray, 94)) : na)
+
+plotshape(showConfirmedTurnLabels and confirmedFlipUp, title="Confirmed Trough / Path Up", text="TROUGH\nPATH UP", style=shape.labelup, location=location.belowbar, color=color.new(color.green, 0), textcolor=color.white, size=size.small)
+plotshape(showConfirmedTurnLabels and confirmedFlipDn, title="Confirmed Peak / Path Down", text="PEAK\nPATH DN", style=shape.labeldown, location=location.abovebar, color=color.new(color.red, 0), textcolor=color.white, size=size.small)
+
+if showResolvedPivotLabels and confirmedTurn and not na(resolvedPivotBar) and not na(resolvedPivotPx)
+    bool isTrough = confirmedTurnDir > 0
+    label.new(resolvedPivotBar, resolvedPivotPx, isTrough ? "RESOLVED TROUGH" : "RESOLVED PEAK", xloc=xloc.bar_index, style=isTrough ? label.style_label_up : label.style_label_down, color=isTrough ? color.new(color.green, 25) : color.new(color.red, 25), textcolor=color.white, size=size.tiny)
+
+var label liveStateLabel = na
+if barstate.islast
+    if not na(liveStateLabel)
+        label.delete(liveStateLabel)
+        liveStateLabel := na
+    if showLiveStateLabel
+        float fromCandidateNow = f_absPctMove(nextCandidatePx, src)
+        string stateTxt = f_pathStateTxt(nextDir) + "\nrev " + str.tostring(reversalPct, "#.##") + "%"
+        if nextDir != 0
+            stateTxt += "\nreversal now " + str.tostring(fromCandidateNow, "#.##") + "%"
+        liveStateLabel := label.new(bar_index, pathNow, stateTxt, xloc=xloc.bar_index, style=label.style_label_left, color=pathColor, textcolor=color.white, size=size.small)
+
+//==================================================================================================
+// SECTION 6 — ALERTS
+//==================================================================================================
+alertcondition(confirmedFlipUp and alertTrough, "TROUGH / Path Up", "Realtime Non-Repaint Path: confirmed TROUGH / PATH UP")
+alertcondition(confirmedFlipDn and alertPeak, "PEAK / Path Down", "Realtime Non-Repaint Path: confirmed PEAK / PATH DOWN")
+
+//==================================================================================================
+// SECTION 7 — FIVE-PAGE STATUS TABLE
+//==================================================================================================
+var table statusTbl = table.new(position.top_right, 2, 10, border_width=1)
+
+if barstate.islast
+    table.clear(statusTbl, 0, 0, 1, 9)
+
+    if showStatusTable
+        int storedEvents = array.size(eventDir)
+        int lastDir = storedEvents > 0 ? array.get(eventDir, storedEvents - 1) : 0
+        int lastPivotBar = storedEvents > 0 ? array.get(eventPivotBar, storedEvents - 1) : na
+        float lastPivotPx = storedEvents > 0 ? array.get(eventPivotPx, storedEvents - 1) : na
+        int lastConfirmBar = storedEvents > 0 ? array.get(eventConfirmBar, storedEvents - 1) : na
+        float lastConfirmPx = storedEvents > 0 ? array.get(eventConfirmPx, storedEvents - 1) : na
+        float lastReversal = storedEvents > 0 ? array.get(eventReversalPct, storedEvents - 1) : na
+        int lastDelay = storedEvents > 0 ? array.get(eventDelayBars, storedEvents - 1) : na
+        float lastLeg = storedEvents > 0 ? array.get(eventCompletedLegPct, storedEvents - 1) : na
+
+        float avgDelay = confirmedTurnCount > 0 ? sumConfirmationDelayBars / confirmedTurnCount : na
+        float avgReversal = confirmedTurnCount > 0 ? sumConfirmedReversalPct / confirmedTurnCount : na
+        float avgLeg = completedLegCount > 0 ? sumCompletedLegPct / completedLegCount : na
+
+        float fromAnchorPct = f_pctMove(nextAnchorPx, src)
+        float fromCandidatePct = f_pctMove(nextCandidatePx, src)
+        float reversalProgressPct = nextDir == 0 ? math.min(100.0, f_absPctMove(nextAnchorPx, src) * 100.0 / math.max(reversalPct, eps)) : math.min(100.0, f_absPctMove(nextCandidatePx, src) * 100.0 / math.max(reversalPct, eps))
+
+        if statusTablePage == "Summary"
+            f_cell(statusTbl, 0, "RT NR Path", "PERCENT REVERSAL")
+            f_cell(statusTbl, 1, "Path state", f_pathStateTxt(nextDir))
+            f_cell(statusTbl, 2, "Reversal setting", str.tostring(reversalPct, "#.##") + "%")
+            f_cell(statusTbl, 3, "Confirmed turns", str.tostring(confirmedTurnCount))
+            f_cell(statusTbl, 4, "Last turn", f_signalTxt(lastDir))
+            f_cell(statusTbl, 5, "Last confirm bar", na(lastConfirmBar) ? "n/a" : str.tostring(lastConfirmBar))
+            f_cell(statusTbl, 6, "Last reversal", na(lastReversal) ? "n/a" : str.tostring(lastReversal, "#.##") + "%")
+            f_cell(statusTbl, 7, "Avg confirm delay", na(avgDelay) ? "n/a" : str.tostring(avgDelay, "#.00") + " bars")
+            f_cell(statusTbl, 8, "History", "FORWARD-ONLY")
+            f_cell(statusTbl, 9, "Open bar", barstate.isconfirmed ? "CONFIRMED" : "PREVIEW")
+
+        else if statusTablePage == "Signals"
+            f_cell(statusTbl, 0, "Signals", "CONFIRMED ONLY")
+            f_cell(statusTbl, 1, "Trough / Up", str.tostring(confirmedTroughCount))
+            f_cell(statusTbl, 2, "Peak / Down", str.tostring(confirmedPeakCount))
+            f_cell(statusTbl, 3, "Last type", f_signalTxt(lastDir))
+            f_cell(statusTbl, 4, "Pivot bar", na(lastPivotBar) ? "n/a" : str.tostring(lastPivotBar))
+            f_cell(statusTbl, 5, "Pivot price", na(lastPivotPx) ? "n/a" : str.tostring(lastPivotPx, format.mintick))
+            f_cell(statusTbl, 6, "Confirm bar", na(lastConfirmBar) ? "n/a" : str.tostring(lastConfirmBar))
+            f_cell(statusTbl, 7, "Confirm price", na(lastConfirmPx) ? "n/a" : str.tostring(lastConfirmPx, format.mintick))
+            f_cell(statusTbl, 8, "Delay", na(lastDelay) ? "n/a" : str.tostring(lastDelay) + " bars")
+            f_cell(statusTbl, 9, "Back-plotted signal", "NO")
+
+        else if statusTablePage == "Path"
+            f_cell(statusTbl, 0, "Path", "LIVE PREFIX")
+            f_cell(statusTbl, 1, "State", f_pathStateTxt(nextDir))
+            f_cell(statusTbl, 2, "Anchor", str.tostring(nextAnchorPx, format.mintick))
+            f_cell(statusTbl, 3, "Candidate extreme", str.tostring(nextCandidatePx, format.mintick))
+            f_cell(statusTbl, 4, "Path value", str.tostring(pathNow, format.mintick))
+            f_cell(statusTbl, 5, "From anchor", str.tostring(fromAnchorPct, "#.##") + "%")
+            f_cell(statusTbl, 6, "From candidate", str.tostring(fromCandidatePct, "#.##") + "%")
+            f_cell(statusTbl, 7, "Reversal progress", str.tostring(reversalProgressPct, "#.0") + "%")
+            f_cell(statusTbl, 8, "Interpolation", str.tostring(pathResponsiveness, "#.00"))
+            f_cell(statusTbl, 9, "Path history", "NOT REBUILT")
+
+        else if statusTablePage == "Statistics"
+            f_cell(statusTbl, 0, "Statistics", "CAUSAL EVENTS")
+            f_cell(statusTbl, 1, "Turns", str.tostring(confirmedTurnCount))
+            f_cell(statusTbl, 2, "Completed legs", str.tostring(completedLegCount))
+            f_cell(statusTbl, 3, "Avg leg move", na(avgLeg) ? "n/a" : str.tostring(avgLeg, "#.##") + "%")
+            f_cell(statusTbl, 4, "Last leg move", na(lastLeg) ? "n/a" : str.tostring(lastLeg, "#.##") + "%")
+            f_cell(statusTbl, 5, "Avg confirm delay", na(avgDelay) ? "n/a" : str.tostring(avgDelay, "#.00") + " bars")
+            f_cell(statusTbl, 6, "Last confirm delay", na(lastDelay) ? "n/a" : str.tostring(lastDelay) + " bars")
+            f_cell(statusTbl, 7, "Avg reversal at confirm", na(avgReversal) ? "n/a" : str.tostring(avgReversal, "#.##") + "%")
+            f_cell(statusTbl, 8, "Last reversal at confirm", na(lastReversal) ? "n/a" : str.tostring(lastReversal, "#.##") + "%")
+            f_cell(statusTbl, 9, "Stats source", "CONFIRMED LEDGER")
+
+        else
+            f_cell(statusTbl, 0, "Help", "NON-REPAINT PATH")
+            f_cell(statusTbl, 1, "Model", "% REVERSAL")
+            f_cell(statusTbl, 2, "Extreme", "RUNNING CANDIDATE")
+            f_cell(statusTbl, 3, "Turn proof", "REVERSAL FROM EXTREME")
+            f_cell(statusTbl, 4, "Historical path", "BAR-BY-BAR COMMITTED")
+            f_cell(statusTbl, 5, "Interpolation", "FORWARD EASED")
+            f_cell(statusTbl, 6, "Turn labels", "CONFIRM BAR")
+            f_cell(statusTbl, 7, "Pivot labels", showResolvedPivotLabels ? "OPTIONAL / RETRO LOCATION" : "OFF")
+            f_cell(statusTbl, 8, "Future rebuild", "NONE")
+            f_cell(statusTbl, 9, "Trade management", "NOT INCLUDED")
