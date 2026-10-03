@@ -1,0 +1,57 @@
+/*backtest
+start: 2024-08-19 00:00:00
+end: 2025-08-18 00:00:00
+period: 2d
+basePeriod: 2d
+exchanges: [{"eid":"Futures_OKX","currency":"ETH_USDT","balance":5000}]
+*/
+
+//@version=5
+strategy("Stochastic + MA + Divergence Strategy", overlay=true, margin_long=100, margin_short=100)
+
+// === INPUTS ===
+stochKLength = input.int(14, "Stochastic %K Length")
+stochDLength = input.int(3, "Stochastic %D Length")
+stochSmooth = input.int(3, "Stochastic Smoothing")
+maLength = input.int(50, "MA Length")
+
+overbought = input.int(80, "Overbought Level")
+oversold = input.int(20, "Oversold Level")
+
+useDivergence = input.bool(true, "Enable Divergence Signals")
+
+// === INDICATORS ===
+// Moving Average (Trend Filter)
+ma = ta.sma(close, maLength)
+plot(ma, color=color.orange, title="MA Trend Filter")
+
+// Stochastic
+k = ta.sma(ta.stoch(close, high, low, stochKLength), stochSmooth)
+d = ta.sma(k, stochDLength)
+plot(k, color=color.blue, title="%K")
+plot(d, color=color.red, title="%D")
+hline(overbought, "Overbought", color=color.red)
+hline(oversold, "Oversold", color=color.green)
+
+// === SIGNALS ===
+// Buy: %K cắt lên %D từ vùng quá bán, trend up
+buySignal = ta.crossover(k, d) and k < oversold and close > ma
+
+// Sell: %K cắt xuống %D từ vùng quá mua, trend down
+sellSignal = ta.crossunder(k, d) and k > overbought and close < ma
+
+// === DIVERGENCE ===
+// Simple divergence detection
+bullishDiv = useDivergence and ta.lowestbars(low, 5) != ta.lowestbars(low, 5)[1] and k > k[1] and low < low[1]
+bearishDiv = useDivergence and ta.highestbars(high, 5) != ta.highestbars(high, 5)[1] and k < k[1] and high > high[1]
+
+// === EXECUTE STRATEGY ===
+if buySignal or bullishDiv
+    strategy.entry("Buy", strategy.long)
+
+if sellSignal or bearishDiv
+    strategy.entry("Sell", strategy.short)
+
+// === PLOTTING SIGNALS ===
+plotshape(buySignal or bullishDiv, title="Buy Signal", location=location.belowbar, color=color.green, style=shape.triangleup, size=size.tiny)
+plotshape(sellSignal or bearishDiv, title="Sell Signal", location=location.abovebar, color=color.red, style=shape.triangledown, size=size.tiny)
