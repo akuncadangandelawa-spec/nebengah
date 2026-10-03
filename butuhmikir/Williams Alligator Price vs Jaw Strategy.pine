@@ -1,0 +1,52 @@
+/*backtest
+start: 2024-07-08 00:00:00
+end: 2025-06-01 00:00:00
+period: 1d
+basePeriod: 1d
+exchanges: [{"eid":"Futures_Binance","currency":"ETH_USDT"}]
+*/
+
+//@version=5
+strategy("Williams Alligator Price vs Jaw Strategy", overlay=true)
+
+// Alligator Indicator Parameters
+jawLength = input(13, "Jaw Length")
+jawOffset = input(8, "Jaw Offset")
+teethLength = input(8, "Teeth Length")
+teethOffset = input(5, "Teeth Offset")
+lipsLength = input(5, "Lips Length")
+lipsOffset = input(3, "Lips Offset")
+
+// Calculate Alligator Lines (Smoothed Moving Averages)
+jaw = ta.sma(close, jawLength)[jawOffset]
+teeth = ta.sma(close, teethLength)[teethOffset]
+lips = ta.sma(close, lipsLength)[lipsOffset]
+
+// Plot Alligator Lines
+plot(jaw, color=color.blue, title="Jaw")
+plot(teeth, color=color.red, title="Teeth")
+plot(lips, color=color.green, title="Lips")
+
+// Define Conditions for Buy and Sell Signals
+// Buy: Price crosses above Jaw
+buySignal = ta.crossover(close, jaw)
+// Sell: Price crosses below Jaw
+sellSignal = ta.crossunder(close, jaw)
+
+// Strategy Logic
+if (buySignal)
+    strategy.entry("Long", strategy.long)
+
+if (sellSignal)
+    strategy.entry("Short", strategy.short)
+
+// Optional: Set stop loss and take profit
+stopLoss = input.float(2.0, "Stop Loss %", step=0.1)
+takeProfit = input.float(5.0, "Take Profit %", step=0.1)
+
+strategy.exit("Exit Long", "Long", stop=strategy.position_avg_price * (1 - stopLoss/100), limit=strategy.position_avg_price * (1 + takeProfit/100))
+strategy.exit("Exit Short", "Short", stop=strategy.position_avg_price * (1 + stopLoss/100), limit=strategy.position_avg_price * (1 - takeProfit/100))
+
+// Plot Buy and Sell Signals
+plotshape(buySignal, title="Buy Signal", location=location.belowbar, color=color.green, style=shape.triangleup, size=size.small)
+plotshape(sellSignal, title="Sell Signal", location=location.abovebar, color=color.red, style=shape.triangledown, size=size.small)
