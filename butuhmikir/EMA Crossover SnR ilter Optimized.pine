@@ -1,0 +1,67 @@
+/*backtest
+start: 2024-08-19 00:00:00
+end: 2025-08-18 00:00:00
+period: 1h
+basePeriod: 1h
+exchanges: [{"eid":"Futures_OKX","currency":"BTC_USDT","balance":5000}]
+*/
+
+//@version=5
+strategy("EMA Crossover + Support/Resistance Filter Optimized", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=10)
+
+// ==== INPUT ====
+ema_fast_len = input.int(10, "EMA Fast Length")
+ema_slow_len = input.int(30, "EMA Slow Length")
+sr_lookback = input.int(50, "Support/Resistance Lookback")
+
+// ==== EMA CALCULATION ====
+ema_fast = ta.ema(close, ema_fast_len)
+ema_slow = ta.ema(close, ema_slow_len)
+
+// ==== SUPPORT / RESISTANCE DETECTION ====
+highestHigh = ta.highest(high, sr_lookback)
+lowestLow = ta.lowest(low, sr_lookback)
+support = lowestLow
+resistance = highestHigh
+
+// ==== CONDITIONS ====
+bull_cross = ta.crossover(ema_fast, ema_slow)
+bear_cross = ta.crossunder(ema_fast, ema_slow)
+
+// Price near support/resistance (5% range)
+near_support = close <= support * 1.05
+near_resistance = close >= resistance * 0.95
+
+// ==== ENTRY SIGNALS ====
+buy_signal = bull_cross and near_support
+sell_signal = bear_cross and near_resistance
+
+// ==== TRACK OPEN POSITIONS ====
+var bool inLong = false
+var bool inShort = false
+
+if buy_signal and not inLong
+    strategy.entry("Buy", strategy.long)
+    inLong := true
+    inShort := false
+    label.new(bar_index, low, "BUY", style=label.style_label_up, color=color.green, textcolor=color.white, size=size.small)
+
+if sell_signal and not inShort
+    strategy.entry("Sell", strategy.short)
+    inShort := true
+    inLong := false
+    label.new(bar_index, high, "SELL", style=label.style_label_down, color=color.red, textcolor=color.white, size=size.small)
+
+// ==== PLOT EMAs ====
+plot(ema_fast, color=color.orange, title="EMA Fast")
+plot(ema_slow, color=color.blue, title="EMA Slow")
+
+// ==== PLOT SUPPORT / RESISTANCE ====
+plot(support, color=color.green, style=plot.style_linebr, linewidth=1, title="Support")
+plot(resistance, color=color.red, style=plot.style_linebr, linewidth=1, title="Resistance")
+
+// ==== PLOT SHAPES ONLY WHEN ENTERING POSITION ====
+plotshape(buy_signal and not inLong[1], title="Buy Arrow", location=location.belowbar, color=color.green, style=shape.triangleup, size=size.tiny)
+plotshape(sell_signal and not inShort[1], title="Sell Arrow", location=location.abovebar, color=color.red, style=shape.triangledown, size=size.tiny)
+
+
