@@ -1,0 +1,294 @@
+//@version=6
+indicator("4H/H1 Candle Close — Sweep & Reclaim [Signals]", overlay = true,
+     max_labels_count = 500, max_lines_count = 500, max_boxes_count = 500)
+
+// ════════════════════════════ INPUT ════════════════════════════
+htfTfInput   = input.timeframe("240", "HTF (240 = H4 · 60 = H1)")
+sweepBufPct  = input.float(5.0,  "Sweep Buffer (% ATR HTF)", minval = 0.0, step = 0.5)
+rrMult       = input.float(2.0,  "Reward : Risk", minval = 0.5, step = 0.5)
+useLiqTarget = input.bool(true,  "TP = Liquidity HTF (jika ≥ 1.5R)")
+liqLookback  = input.int(10,     "Lookback Liquidity HTF (candle)", minval = 3)
+spreadTk     = input.float(2.0,  "Spread Estimasi (ticks)", minval = 0.5, step = 0.5)
+pivotLen     = input.int(2,      "Pivot LTF (bar kiri/kanan)", minval = 1)
+fvgWindow    = input.int(4,      "FVG dalam N bar pasca-BOS", minval = 1, maxval = 10)
+expiryBars   = input.int(8,      "Setup hangus dalam N bar", minval = 1)
+skipMrkt     = input.bool(true,  "Skip jika FVG midpoint sudah dilewati close")
+sessInput    = input.session("", "Filter Sesi (UTC, kosong = 24/7)")
+waveLong     = input.bool(true,  "Setup LONG (sweep low)")
+waveShort    = input.bool(true,  "Setup SHORT (sweep high)")
+showHTFvis   = input.bool(true,  "Visual: level & box HTF")
+showLabels   = input.bool(true,  "Visual: label sweep/sinyal/BOS")
+showSignals  = input.bool(true,  "Visual: marker sinyal")
+showPost     = input.bool(true,  "E/S/T tampil sampai HTF berikutnya")
+showDiag     = input.bool(true,  "Panel status")
+
+// ══════════════ HTF DATA (candle selesai — non-repaint) ══════════════
+[htfO1, htfH1, htfL1, htfC1, htfH2, htfL2, htfA1] = request.security(syminfo.tickerid, htfTfInput,
+     [ open[1], high[1], low[1], close[1], high[2], low[2], ta.atr(14)[1] ],
+     lookahead = barmerge.lookahead_on)
+htfOpenNow = request.security(syminfo.tickerid, htfTfInput, open, lookahead = barmerge.lookahead_on)
+htfLiqHigh = request.security(syminfo.tickerid, htfTfInput, (ta.highest(high, liqLookback))[2], lookahead = barmerge.lookahead_on)
+htfLiqLow  = request.security(syminfo.tickerid, htfTfInput, (ta.lowest(low,  liqLookback))[2], lookahead = barmerge.lookahead_on)
+
+atrL     = ta.atr(14)
+bufPx    = math.max(syminfo.mintick, sweepBufPct / 100 * htfA1)
+minFvgPx = math.max(spreadTk * 2 * syminfo.mintick, 0.1 * atrL)
+
+isNewHTF = nz(ta.change(time(htfTfInput)), 0) != 0          // bucket HTF baru = candle HTF sebelumnya close
+ratioOK  = timeframe.in_seconds(htfTfInput) / timeframe.in_seconds(timeframe.period) >= 4
+bool inSess = sessInput == ""
+if not inSess
+    inSess := not na(time(timeframe.period, sessInput, "UTC"))
+
+// ══════════════ STATE: 0 idle · 1 wait-BOS · 2 wait-FVG · 3 wait-entry · 4 done ══════════════
+var int   state          = 0
+var bool  dirIsLong      = false
+var int   sigBar         = 0
+var int   bosBar         = 0
+var int   fvgBar         = 0
+var float lastPivotHi    = na
+var int   lastPivotHiBar = 0
+var float lastPivotLo    = na
+var int   lastPivotLoBar = 0
+var float fvgTop         = na
+var float fvgBot         = na
+var float planEntry      = na
+var float planSL         = na
+var float planTP         = na
+var bool  planHold       = false
+var bool  sweptHi        = false
+var bool  sweptLo        = false
+var int   curStart       = 0
+var int   prevStart      = 0
+var int   prevEnd        = 0
+var bool  htfBoxReady    = false
+
+color cBull = color.new(#26a69a, 0)
+color cBear = color.new(#ef5350, 0)
+color cNeut = color.new(#787b86, 0)
+
+bool evSigLong   = false
+bool evSigShort  = false
+bool evBosLong   = false
+bool evBosShort  = false
+bool evFvgLong   = false
+bool evFvgShort  = false
+bool evTrigLong  = false
+bool evTrigShort = false
+bool evExpire    = false
+
+// ══════════════ HTF BARU: reset state & bersihkan plan lama ══════════════
+if isNewHTF
+    if state == 3
+        state     := 4
+        planEntry := na
+        planSL    := na
+        planTP    := na
+    if state == 4 and planHold
+        planHold  := false
+        planEntry := na
+        planSL    := na
+        planTP    := na
+    if state == 1 or state == 2
+        state       := 0
+        dirIsLong   := false
+        lastPivotHi := na
+        lastPivotLo := na
+    if htfBoxReady
+        prevStart := curStart
+        prevEnd   := bar_index - 1
+    else
+        prevStart   := bar_index
+        prevEnd     := bar_index - 1
+        htfBoxReady := true
+    curStart := bar_index
+    sweptHi := false
+    sweptLo := false
+
+// ══════════════ SINYAL (bar pertama bucket HTF baru) ══════════════
+bool upSweep = isNewHTF and ratioOK and htfL1 < htfL2 - bufPx and htfC1 > htfL2 and htfC1 > htfO1
+bool dnSweep = isNewHTF and ratioOK and htfH1 > htfH2 + bufPx and htfC1 < htfH2 and htfC1 < htfO1
+if upSweep and waveLong and (state == 0 or state == 4)
+    evSigLong := true
+    state     := 1
+    dirIsLong := true
+    sigBar    := bar_index
+if dnSweep and waveShort and (state == 0 or state == 4)
+    evSigShort := true
+    state      := 1
+    dirIsLong  := false
+    sigBar     := bar_index
+
+// ══════════════ PIVOT LTF (terkonfirmasi, pivot-bar setelah sinyal) ══════════════
+pivotHi = ta.pivothigh(high, pivotLen, pivotLen)
+pivotLo = ta.pivotlow(low,  pivotLen, pivotLen)
+if state == 1
+    if not na(pivotHi) and (bar_index - pivotLen) > sigBar
+        lastPivotHi    := pivotHi
+        lastPivotHiBar := bar_index - pivotLen
+    if not na(pivotLo) and (bar_index - pivotLen) > sigBar
+        lastPivotLo    := pivotLo
+        lastPivotLoBar := bar_index - pivotLen
+
+// ══════════════ BOS ══════════════
+if state == 1 and bar_index > sigBar
+    if dirIsLong and not na(lastPivotHi) and close > lastPivotHi
+        bosBar    := bar_index
+        state     := 2
+        evBosLong := true
+    if not dirIsLong and not na(lastPivotLo) and close < lastPivotLo
+        bosBar     := bar_index
+        state      := 2
+        evBosShort := true
+
+// ══════════════ FVG (+ validasi rencana entry) ══════════════
+bool fvgBull = false
+bool fvgBear = false
+if state == 2 and (bar_index - bosBar) <= fvgWindow
+    if dirIsLong and low > high[2] and (low - high[2]) >= minFvgPx and (not skipMrkt or close > (low + high[2]) / 2)
+        fvgBull := true
+    if not dirIsLong and high < low[2] and (low[2] - high) >= minFvgPx and (not skipMrkt or close < (low[2] + high) / 2)
+        fvgBear := true
+if fvgBull or fvgBear
+    fvgTop    := fvgBull ? low     : low[2]
+    fvgBot    := fvgBull ? high[2] : high
+    fvgBar    := bar_index
+    planEntry := (fvgTop + fvgBot) / 2
+    planSL    := dirIsLong ? htfL1 - bufPx : htfH1 + bufPx
+    float dist = dirIsLong ? planEntry - planSL : planSL - planEntry
+    if dist > minFvgPx and inSess
+        float tpLiq = dirIsLong ? htfLiqHigh : htfLiqLow
+        bool  liqOK = useLiqTarget and not na(tpLiq) and (dirIsLong ? tpLiq >= planEntry + 1.5 * dist : tpLiq <= planEntry - 1.5 * dist)
+        planTP     := liqOK ? tpLiq : (dirIsLong ? planEntry + rrMult * dist : planEntry - rrMult * dist)
+        state      := 3
+        evFvgLong  := fvgBull          // alert ⑤ hanya saat rencana valid
+        evFvgShort := fvgBear
+    else
+        state     := 0
+        planEntry := na
+        planSL    := na
+        planTP    := na
+
+// window BOS→FVG lewat tanpa FVG = hangus
+if state == 2 and (bar_index - bosBar) > fvgWindow
+    state     := 4
+    dirIsLong := false
+    evExpire  := true
+
+// ══════════════ TRIGGER ENTRY (sentuh mid FVG) + EXPIRY ══════════════
+if state == 3 and bar_index > fvgBar
+    if dirIsLong and low <= planEntry
+        evTrigLong := true
+        state      := 4
+        planHold   := true
+    if not dirIsLong and high >= planEntry
+        evTrigShort := true
+        state       := 4
+        planHold    := true
+if state == 3 and (bar_index - fvgBar) >= expiryBars
+    evExpire := true
+    state    := 4
+    planHold := true
+
+// ══════════════ VISUAL: LEVEL & BOX HTF ══════════════
+plot(showHTFvis and not isNewHTF ? htfH1 : float(na), "Prev HTF High", cBear, 1, plot.style_linebr)
+plot(showHTFvis and not isNewHTF ? htfL1 : float(na), "Prev HTF Low",  cBull, 1, plot.style_linebr)
+plot(showHTFvis ? htfOpenNow : float(na), "HTF Open", cNeut, 1, plot.style_linebr)
+var box htfPrevBox = na
+if isNewHTF and showHTFvis
+    if not na(htfPrevBox)
+        box.delete(htfPrevBox)
+    if prevEnd > prevStart and not na(htfH1) and not na(htfL1)
+        htfPrevBox := box.new(prevStart, htfH1, prevEnd, htfL1,
+             bgcolor = htfC1 >= htfO1 ? color.new(cBull, 88) : color.new(cBear, 88),
+             border_color = color.new(cNeut, 55))
+
+// ══════════════ VISUAL: SWEEP (candle HTF berjalan) ══════════════
+bool sweepHiNow = showLabels and ratioOK and not sweptHi and high >= htfH1
+bool sweepLoNow = showLabels and ratioOK and not sweptLo and low  <= htfL1
+if sweepHiNow
+    sweptHi := true
+if sweepLoNow
+    sweptLo := true
+plotshape(sweepHiNow, "Sweep High", shape.diamond, location.abovebar, cBear, size = size.tiny)
+plotshape(sweepLoNow, "Sweep Low",  shape.diamond, location.belowbar, cBull, size = size.tiny)
+if sweepHiNow
+    label.new(bar_index, high, "SWEEP HI", color = color.new(cBear, 70), style = label.style_none, textcolor = cBear)
+if sweepLoNow
+    label.new(bar_index, low,  "SWEEP LO", color = color.new(cBull, 70), style = label.style_none, textcolor = cBull)
+
+// ══════════════ VISUAL: SINYAL / BOS / FVG / TRIGGER ══════════════
+plotshape(showSignals and evSigLong,  "Sinyal LONG",  shape.triangleup,   location.belowbar, cBull, size = size.small)
+plotshape(showSignals and evSigShort, "Sinyal SHORT", shape.triangledown, location.abovebar, cBear, size = size.small)
+if showLabels and evSigLong
+    label.new(bar_index, low,  "HTF-SWEEP\nWAIT BOS", color = color.new(cBull, 25), style = label.style_label_up,   textcolor = color.white)
+if showLabels and evSigShort
+    label.new(bar_index, high, "HTF-SWEEP\nWAIT BOS", color = color.new(cBear, 25), style = label.style_label_down, textcolor = color.white)
+if evBosLong
+    line.new(lastPivotHiBar, lastPivotHi, bosBar, lastPivotHi, color = cBull)
+    label.new(int(math.avg(lastPivotHiBar, bosBar)), lastPivotHi, "BOS", color = color.new(cBull, 100), style = label.style_none, textcolor = cBull)
+if evBosShort
+    line.new(lastPivotLoBar, lastPivotLo, bosBar, lastPivotLo, color = cBear)
+    label.new(int(math.avg(lastPivotLoBar, bosBar)), lastPivotLo, "BOS", color = color.new(cBear, 100), style = label.style_none, textcolor = cBear)
+plotshape(showSignals and evBosLong,  "BOS Bull", shape.circle,      location.belowbar, cBull, size = size.tiny, text = "BOS", textcolor = cBull)
+plotshape(showSignals and evBosShort, "BOS Bear", shape.circle,      location.abovebar, cBear, size = size.tiny, text = "BOS", textcolor = cBear)
+plotshape(showSignals and evFvgLong,  "FVG Bull", shape.triangleup,   location.belowbar, cBull, size = size.tiny, text = "FVG", textcolor = cBull)
+plotshape(showSignals and evFvgShort, "FVG Bear", shape.triangledown, location.abovebar, cBear, size = size.tiny, text = "FVG", textcolor = cBear)
+plotshape(evTrigLong,  "ENTRY LONG",  shape.flag, location.belowbar, color.new(color.teal, 0),   size = size.small, text = "ENTRY", textcolor = color.new(color.teal, 0))
+plotshape(evTrigShort, "ENTRY SHORT", shape.flag, location.abovebar, color.new(color.orange, 0), size = size.small, text = "ENTRY", textcolor = color.new(color.orange, 0))
+plotshape(evExpire, "Setup hangus", shape.xcross, location.abovebar, cNeut, size = size.tiny)
+
+// ══════════════ VISUAL: GARIS ENTRY / SL / TP ══════════════
+bool showPlan = state == 3 or (state == 4 and planHold and showPost)
+plot(showPlan ? planEntry : float(na), "Entry (FVG mid)", color.new(color.teal, 0), 1, plot.style_linebr)
+plot(showPlan ? planSL    : float(na), "Stop",           cBear, 2, plot.style_linebr)
+plot(showPlan ? planTP    : float(na), "Target",         cBull, 2, plot.style_linebr)
+
+// ══════════════ VISUAL: BOX FVG ══════════════
+var array<box>   fvgArr    = array.new<box>()
+var array<float> fvgMidArr = array.new<float>()
+var array<int>   fvgDirArr = array.new<int>()
+if evFvgLong or evFvgShort
+    box nb = box.new(bar_index - 2, fvgTop, bar_index, fvgBot,
+         bgcolor = evFvgLong ? color.new(cBull, 85) : color.new(cBear, 85),
+         border_color = evFvgLong ? color.new(cBull, 45) : color.new(cBear, 45))
+    array.push(fvgArr, nb)
+    array.push(fvgMidArr, (fvgTop + fvgBot) / 2)
+    array.push(fvgDirArr, evFvgLong ? 1 : -1)
+if array.size(fvgArr) > 60
+    box.delete(array.shift(fvgArr))
+    array.shift(fvgMidArr)
+    array.shift(fvgDirArr)
+if array.size(fvgArr) > 0
+    for i = array.size(fvgArr) - 1 to 0
+        box b     = array.get(fvgArr, i)
+        float mid = array.get(fvgMidArr, i)
+        bool  isL = array.get(fvgDirArr, i) == 1
+        box.set_right(b, bar_index)
+        bool seal = isL ? low <= mid : high >= mid
+        if seal
+            box.delete(b)
+            array.remove(fvgArr, i)
+            array.remove(fvgMidArr, i)
+            array.remove(fvgDirArr, i)
+
+// ══════════════ ALERTS ══════════════
+alertcondition(evSigLong,  "① Sinyal LONG (HTF sweep)",  "{{ticker}} {{interval}}: HTF sweep LONG @ {{close}} — tunggu BOS + FVG")
+alertcondition(evSigShort, "② Sinyal SHORT (HTF sweep)", "{{ticker}} {{interval}}: HTF sweep SHORT @ {{close}} — tunggu BOS + FVG")
+alertcondition(evBosLong,  "③ BOS Bullish",              "{{ticker}} {{interval}}: BOS bullish @ {{close}}")
+alertcondition(evBosShort, "④ BOS Bearish",              "{{ticker}} {{interval}}: BOS bearish @ {{close}}")
+alertcondition(evFvgLong or evFvgShort, "⑤ FVG valid — siapkan limit", "{{ticker}} {{interval}}: FVG aktif — pasang limit di zone")
+alertcondition(evTrigLong or evTrigShort, "⑥ ENTRY hit (FVG mid)", "{{ticker}} {{interval}}: ENTRY FVG mid tersentuh @ {{close}}")
+alertcondition(evExpire, "⑦ Setup hangus", "{{ticker}} {{interval}}: setup hangus tanpa entry")
+
+// ══════════════ PANEL STATUS ══════════════
+var table st = table.new(position.top_left, 2, 4, bgcolor = color.new(color.black, 20))
+if showDiag and barstate.islast
+    table.cell(st, 0, 0, "TF", text_color = color.white, text_size = size.small)
+    table.cell(st, 1, 0, timeframe.period + " → " + htfTfInput + (ratioOK ? "" : " ⚠ TF SALAH"), text_color = ratioOK ? color.white : cBear, text_size = size.small)
+    table.cell(st, 0, 1, "State", text_color = color.white, text_size = size.small)
+    table.cell(st, 1, 1, state == 0 ? "IDLE" : state == 1 ? "TUNGGU BOS" : state == 2 ? "TUNGGU FVG" : state == 3 ? "TUNGGU ENTRY" : "DONE", text_color = color.white, text_size = size.small)
+    table.cell(st, 0, 2, "Setup", text_color = color.white, text_size = size.small)
+    table.cell(st, 1, 2, state == 3 or (state == 4 and planHold) ? (dirIsLong ? "LONG" : "SHORT") + "  E " + str.tostring(planEntry, format.mintick) : "—", text_color = dirIsLong ? cBull : cBear, text_size = size.small)
+    table.cell(st, 0, 3, "HTF candle", text_color = color.white, text_size = size.small)
+    table.cell(st, 1, 3, htfC1 >= htfO1 ? "↑ bullish" : "↓ bearish", text_color = htfC1 >= htfO1 ? cBull : cBear, text_size = size.small)
