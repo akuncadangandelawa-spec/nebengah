@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <style>
+        html, body {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            background-color: #0E1117;
+            overflow: hidden;
+        }
+        #tradingview_widget {
+            width: 100%;
+            height: 100%;
+        }
+    </style>
+</head>
+<body>
+    <div id="tradingview_widget"></div>
+    <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
+    <script type="text/javascript">
+        function parseQuery() {
+            var query = {};
+            var pairs = (location.search.substring(1)).split('&');
+            for (var i = 0; i < pairs.length; i++) {
+                var pair = pairs[i].split('=');
+                if (pair[0]) {
+                    query[decodeURIComponent(pair[0])] = decodeURIComponent(pair[1] || '');
+                }
+            }
+            return query;
+        }
+
+        var params = parseQuery();
+        var symbol = params.symbol || "OANDA:XAUUSD";
+        var interval = params.interval || "60"; // Default 1H
+        var theme = params.theme || "dark";
+        var locale = params.locale || "id";
+        var rawStudies = params.studies || "";
+        var studiesArray = rawStudies ? rawStudies.split(',') : ["STD;EMA"];
+
+        var studiesMap = {
+            "EMA_20": { "id": "STD;EMA", "inputs": { "length": 20 } },
+            "EMA_50": { "id": "STD;EMA", "inputs": { "length": 50 } },
+            "EMA_200": { "id": "STD;EMA", "inputs": { "length": 200 } },
+            "RSI": "STD;RSI",
+            "MACD": "STD;MACD",
+            "BB": "STD;Bollinger_Bands",
+            "VOLUME": "STD;Volume",
+            "STOCH": "STD;Stochastic",
+            "FIB": "STD;Fibonacci_Retracement"
+        };
+
+        var activeStudies = [];
+        for (var i = 0; i < studiesArray.length; i++) {
+            var key = studiesArray[i].trim();
+            if (studiesMap[key]) {
+                activeStudies.push(studiesMap[key]);
+            }
+        }
+        if (activeStudies.length === 0) {
+            activeStudies = ["STD;EMA"];
+        }
+
+        new TradingView.widget({
+            "autosize": true,
+            "symbol": symbol,
+            "interval": interval,
+            "timezone": "Etc/UTC",
+            "theme": theme,
+            "style": "1",
+            "locale": locale,
+            "toolbar_bg": "#1A1F2C",
+            "enable_publishing": false,
+            "allow_symbol_change": false,
+            "container_id": "tradingview_widget",
+            "studies": activeStudies,
+            "hide_top_toolbar": false,
+            "save_image": false
+        });
+    </script>
+</body>
+</html>
