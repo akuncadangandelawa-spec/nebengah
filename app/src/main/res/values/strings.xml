@@ -1,0 +1,47 @@
+<resources>
+    <string name="app_name">AI XAUUSD Analyzer</string>
+    <string name="dashboard_title">XAUUSD • OANDA</string>
+    <string name="settings_title">Settings</string>
+
+    <!-- Dashboard Strings -->
+    <string name="timeframe_label">Timeframe</string>
+    <string name="indicators_label">Indicators</string>
+    <string name="btn_screenshot">📸 Screenshot Chart</string>
+    <string name="chat_hint">Tanya AI tentang chart/forex…</string>
+    <string name="analysis_prompt_title">Perintah Analisa (manual)</string>
+    <string name="btn_analyze_ai">Analisa dengan AI</string>
+    <string name="reload_chart">Reload Chart</string>
+
+    <!-- Settings Strings -->
+    <string name="section_ai_model">Model AI Active</string>
+    <string name="section_additional_providers">Provider Configurations</string>
+    <string name="section_creativity">Kreativitas AI</string>
+    <string name="section_system_instruction">System Instruction (Peran AI)</string>
+
+    <string name="model_gemini_flash">Gemini Flash (Free)</string>
+    <string name="model_gemini_pro">Gemini Pro Preview (Free)</string>
+    <string name="model_gemini_flash_preview">Gemini Flash Preview (Free)</string>
+    <string name="model_custom_gemini">Custom Gemini API</string>
+    <string name="model_openai">OpenAI</string>
+    <string name="model_groq">Groq (Free tier)</string>
+    <string name="model_openrouter">OpenRouter</string>
+
+    <string name="label_api_key">API Key</string>
+    <string name="label_base_url">Base URL (opsional)</string>
+    <string name="label_model_name">Model Name</string>
+    <string name="label_temperature">Temperature: %.1f</string>
+    <string name="label_max_tokens">Max Tokens: %d</string>
+
+    <string name="default_system_instruction">Kamu adalah analis forex profesional yang ahli membaca chart TradingView. Jawab ringkas, terstruktur, dan sertakan level harga konkret jika terlihat di chart.</string>
+    <string name="btn_reset_default">Reset ke Default</string>
+    <string name="btn_test_endpoint">Test Endpoint</string>
+    <string name="btn_cancel">Batal</string>
+    <string name="btn_save">Simpan</string>
+
+    <!-- Messages & Errors -->
+    <string name="msg_settings_saved">Settings disimpan</string>
+    <string name="msg_api_key_empty">API Key belum diisi untuk provider aktif</string>
+    <string name="msg_endpoint_success">200 OK — Latency: %d ms</string>
+    <string name="msg_endpoint_error">Error: %s</string>
+    <string name="msg_groq_vision_warning">Catatan: Model Groq ini tidak mendukung gambar. Gambar akan diabaikan.</string>
+</resources>
